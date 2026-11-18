@@ -14,7 +14,14 @@ const admin = new PrismaClient();
 const database = new PrismaClient({ datasourceUrl: databaseURL.toString() });
 const secret = randomBytes(48).toString('base64url');
 const password = 'Synthetic-test-passphrase-2026!';
-const sendSms = vi.fn(async () => 'SM-synthetic-regression');
+const sendSms = vi.fn(async (input: { from: string; to: string; body: string }) => ({
+  id: `SM${randomUUID().replaceAll('-', '')}`,
+  status: 'queued',
+  from: input.from,
+  to: input.to,
+  body: input.body,
+  errorCode: null,
+}));
 const sendEmail = vi.fn(async () => 'resend-auth-synthetic');
 let server: Server;
 let base: string;
@@ -114,7 +121,7 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     }));
     vi.doMock('./twilio.service.js', async () => ({
       ...(await vi.importActual<typeof import('./twilio.service.js')>('./twilio.service.js')),
-      sendSms,
+      smsProvider: { configured: () => true, send: sendSms, fetch: vi.fn() },
       validateTwilioSignature: (req: { header: (name: string) => string | undefined }) =>
         req.header('x-twilio-signature') === 'synthetic-provider-authorized',
     }));
@@ -797,7 +804,7 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
       data: { twilioPhoneNumber: '+15555550600', forwardToPhoneNumber: '+15555550601' },
     });
     const body = {
-      CallSid: 'CA-synthetic-auth-regression',
+      CallSid: `CA${randomUUID().replaceAll('-', '')}`,
       From: '+15555550605',
       To: '+15555550600',
     };
@@ -817,14 +824,33 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     const missed = '/webhooks/twilio/voice/status?companySlug=unassigned-legacy';
     expect((await post(missed, { ...body, DialCallStatus: 'no-answer' })).status).toBe(200);
     expect((await post(missed, { ...body, DialCallStatus: 'no-answer' })).status).toBe(200);
+    expect(sendSms).not.toHaveBeenCalled();
+    const { runJob } = await import('../worker.js');
+    const processEvent = async (eventType: string) => {
+      const event = await database.webhookEvent.findFirstOrThrow({
+        where: { companyId: legacyId, eventType },
+      });
+      const job = await database.backgroundJob.update({
+        where: { id: event.jobId ?? '' },
+        data: {
+          status: 'RUNNING',
+          attempts: 1,
+          leaseToken: randomUUID(),
+          leaseUntil: new Date(Date.now() + 60000),
+        },
+      });
+      await runJob(job);
+    };
+    await processEvent('VOICE_STATUS');
     expect(sendSms).toHaveBeenCalledTimes(1);
     const sms = {
-      MessageSid: 'SM-synthetic-auth-regression',
+      MessageSid: `SM${randomUUID().replaceAll('-', '')}`,
       From: body.From,
       To: body.To,
       Body: 'I smell gas near the furnace.',
     };
     expect((await post('/webhooks/twilio/sms', sms)).status).toBe(200);
+    await processEvent('SMS_MESSAGE');
     const lead = await database.lead.findFirstOrThrow({
       where: { companyId: legacyId, phone: body.From },
     });

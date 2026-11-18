@@ -5,13 +5,15 @@ import {
   LeadStatus,
   MessageDirection,
   type Lead,
+  type Message,
+  type Prisma,
   type UrgencyLevel,
 } from '@prisma/client';
 import { recordLeadCreated, recordLeadMilestone } from './lead-follow-up.service.js';
 import { callNoteInclude, serializeCallNote } from './call-note.service.js';
 import { followUpInclude, serializeFollowUp } from './follow-up.service.js';
 
-type LeadUpdates = {
+export type LeadUpdates = {
   source?: LeadSource;
   status?: LeadStatus;
   serviceType?: string | null;
@@ -80,44 +82,24 @@ export function shouldCreateNewLeadForMissedCall(
   return false;
 }
 
-function createFreshLead(companyId: string, phone: string, source: LeadSource): Promise<Lead> {
-  return prisma.$transaction(async (tx) => {
-    const lead = await tx.lead.create({
-      data: {
-        companyId,
-        phone,
-        source,
-        status: LeadStatus.NEW,
-        needsHuman: false,
-        lastActivityAt: new Date(),
-      },
-    });
-    await recordLeadCreated(tx, lead);
-    return lead;
+async function createFreshLead(
+  db: Prisma.TransactionClient,
+  companyId: string,
+  phone: string,
+  source: LeadSource,
+): Promise<Lead> {
+  const lead = await db.lead.create({
+    data: {
+      companyId,
+      phone,
+      source,
+      status: LeadStatus.NEW,
+      needsHuman: false,
+      lastActivityAt: new Date(),
+    },
   });
-}
-
-export async function recordWebhookEventOnce(
-  eventType: string,
-  externalId: string,
-): Promise<boolean> {
-  try {
-    await prisma.webhookEvent.create({
-      data: {
-        eventType,
-        externalId,
-      },
-    });
-
-    return true;
-  } catch (error: unknown) {
-    const maybeCode = (error as { code?: string } | undefined)?.code;
-    if (maybeCode === 'P2002') {
-      return false;
-    }
-
-    throw error;
-  }
+  await recordLeadCreated(db, lead);
+  return lead;
 }
 
 /**
@@ -127,20 +109,22 @@ export async function recordWebhookEventOnce(
 export async function findOrCreateLeadForMissedCall(
   companyId: string,
   phone: string,
+  db?: Prisma.TransactionClient,
 ): Promise<Lead> {
+  if (!db) return prisma.$transaction((tx) => findOrCreateLeadForMissedCall(companyId, phone, tx));
   const normalizedPhone = normalizePhone(phone);
 
-  const existing = await prisma.lead.findFirst({
+  const existing = await db.lead.findFirst({
     where: { companyId, phone: normalizedPhone },
     orderBy: { lastActivityAt: 'desc' },
   });
 
   if (shouldCreateNewLeadForMissedCall(existing, new Date())) {
-    return createFreshLead(companyId, normalizedPhone, LeadSource.MISSED_CALL);
+    return createFreshLead(db, companyId, normalizedPhone, LeadSource.MISSED_CALL);
   }
 
   if (existing!.source !== LeadSource.MISSED_CALL) {
-    return prisma.lead.update({
+    return db.lead.update({
       where: { id: existing!.id },
       data: { source: LeadSource.MISSED_CALL },
     });
@@ -157,10 +141,12 @@ export async function findOrCreateActiveLead(
   companyId: string,
   phone: string,
   source: LeadSource,
+  db?: Prisma.TransactionClient,
 ): Promise<Lead> {
+  if (!db) return prisma.$transaction((tx) => findOrCreateActiveLead(companyId, phone, source, tx));
   const normalizedPhone = normalizePhone(phone);
 
-  const existing = await prisma.lead.findFirst({
+  const existing = await db.lead.findFirst({
     where: {
       companyId,
       phone: normalizedPhone,
@@ -171,7 +157,7 @@ export async function findOrCreateActiveLead(
 
   if (existing) {
     if (existing.source !== source) {
-      return prisma.lead.update({
+      return db.lead.update({
         where: { id: existing.id },
         data: { source },
       });
@@ -179,7 +165,7 @@ export async function findOrCreateActiveLead(
     return existing;
   }
 
-  return createFreshLead(companyId, normalizedPhone, source);
+  return createFreshLead(db, companyId, normalizedPhone, source);
 }
 
 /** Prisma Decimal fields serialize as strings by default; convert to number for API consumers. */
@@ -234,6 +220,7 @@ export async function getLeadDetail(leadId: string, companyId?: string) {
       },
       messages: {
         orderBy: { createdAt: 'asc' },
+        include: { smsDelivery: true },
       },
     },
   });
@@ -250,16 +237,20 @@ export async function getLeadDetail(leadId: string, companyId?: string) {
  * Creates a message and simultaneously bumps lastActivityAt on the lead
  * so stale-window logic stays accurate.
  */
-export async function createMessage(leadId: string, direction: MessageDirection, body: string) {
-  const [message] = await prisma.$transaction([
-    prisma.message.create({
-      data: { leadId, direction, body },
-    }),
-    prisma.lead.update({
-      where: { id: leadId },
-      data: { lastActivityAt: new Date() },
-    }),
-  ]);
+export async function createMessage(
+  leadId: string,
+  direction: MessageDirection,
+  body: string,
+  db?: Prisma.TransactionClient,
+): Promise<Message> {
+  if (!db) return prisma.$transaction((tx) => createMessage(leadId, direction, body, tx));
+  const message = await db.message.create({
+    data: { leadId, direction, body },
+  });
+  await db.lead.update({
+    where: { id: leadId },
+    data: { lastActivityAt: new Date() },
+  });
   return message;
 }
 
@@ -281,13 +272,16 @@ export async function getRecentMessages(leadId: string, limit: number) {
   });
 }
 
-export async function updateLead(leadId: string, updates: LeadUpdates): Promise<Lead> {
-  return prisma.$transaction(async (tx) => {
-    const previous = await tx.lead.findUniqueOrThrow({ where: { id: leadId } });
-    const lead = await tx.lead.update({ where: { id: leadId }, data: updates });
-    await recordLeadMilestone(tx, previous, lead);
-    return lead;
-  });
+export async function updateLead(
+  leadId: string,
+  updates: LeadUpdates,
+  db?: Prisma.TransactionClient,
+): Promise<Lead> {
+  if (!db) return prisma.$transaction((tx) => updateLead(leadId, updates, tx));
+  const previous = await db.lead.findUniqueOrThrow({ where: { id: leadId } });
+  const lead = await db.lead.update({ where: { id: leadId }, data: updates });
+  await recordLeadMilestone(db, previous, lead);
+  return lead;
 }
 
 export type LeadOutcomePatch = {

@@ -13,6 +13,8 @@ import {
 export const openai = env.OPENAI_API_KEY
   ? new OpenAI({
       apiKey: env.OPENAI_API_KEY,
+      timeout: env.OPENAI_TIMEOUT_MS,
+      maxRetries: 0,
     })
   : null;
 
@@ -115,6 +117,7 @@ export async function runQualificationModel(params: RequestParams): Promise<Qual
 
   const response = await openai.responses.create({
     model: env.OPENAI_MODEL,
+    max_output_tokens: 1200,
     input: [
       {
         role: 'system',

@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
     backgroundJob: { upsert: vi.fn(), updateMany: vi.fn(), findFirst: vi.fn() },
     jobAttempt: { updateMany: vi.fn() },
     $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
   },
 }));
 vi.mock('@lead-recovery/database', () => ({ prisma: mocks.db }));
@@ -42,6 +43,7 @@ const job: BackgroundJob = {
 };
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.db.$transaction.mockImplementation((fn) => fn(mocks.db));
   mocks.db.backgroundJob.updateMany.mockResolvedValue({ count: 1 });
 });
 describe('durable job leasing and idempotency', () => {
@@ -62,7 +64,8 @@ describe('durable job leasing and idempotency', () => {
     mocks.db.$queryRaw.mockResolvedValue([job]);
     expect(await claimBackgroundJob()).toEqual(job);
     const query = mocks.db.$queryRaw.mock.calls[0]?.[0].join(' ');
-    expect(query).toContain('FOR UPDATE SKIP LOCKED');
+    expect(query).toContain('FOR UPDATE OF candidate SKIP LOCKED');
+    expect(query).toContain('earlier."status" <> \'COMPLETED\'');
     expect(query).toContain('"leaseUntil" < (NOW() AT TIME ZONE \'UTC\')');
   });
   it('fences completion by the current lease token and records the attempt', async () => {

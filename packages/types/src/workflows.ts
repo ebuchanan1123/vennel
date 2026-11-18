@@ -300,9 +300,26 @@ export type WorkspaceSettings = {
   };
 };
 
+export type SmsDeliveryRecord = {
+  id: string;
+  status: 'PENDING' | 'SENDING' | 'ACCEPTED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'UNKNOWN';
+  providerId: string | null;
+  providerStatus: string | null;
+  acceptedAt: string | null;
+  deliveredAt: string | null;
+  lastError: string | null;
+  errorCode: string | null;
+};
+
 export type BackgroundJobRecord = {
   id: string;
-  kind: 'AUTH_EMAIL' | 'OWNER_EMAIL' | 'DOCUMENT_EMAIL' | 'LEAD_FOLLOW_UP_SUGGESTIONS';
+  kind:
+    | 'AUTH_EMAIL'
+    | 'OWNER_EMAIL'
+    | 'DOCUMENT_EMAIL'
+    | 'LEAD_FOLLOW_UP_SUGGESTIONS'
+    | 'INBOUND_SMS'
+    | 'MISSED_CALL_RECOVERY';
   status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED';
   attempts: number;
   maxAttempts: number;

@@ -15,7 +15,7 @@ AI-powered missed-call recovery, customer management, and owner-reviewed estimat
 - Business-local follow-up tasks and suggestions, customer/lead history, opt-in owner emails, and durable background processing.
 - Better Auth accounts, email verification/password reset, database sessions, per-business owner/staff permissions, verified invitations, and shared business onboarding.
 
-**This is an authenticated development-stage application, not a certified public-production release.** Private APIs require a verified account and current business membership. Owner-only actions are enforced on the API, not merely hidden in the dashboard. The old developer-token bypass has been removed. Payment collection is not implemented. Live integrations, deployment hardening, monitoring, retention policies and distributed SMS processing still need release validation before a real-customer pilot.
+**This is an authenticated development-stage application, not a certified public-production release.** Private APIs require a verified account and current business membership. Owner-only actions are enforced on the API, not merely hidden in the dashboard. The old developer-token bypass has been removed. Payment collection is not implemented. Live integrations, deployment hardening, monitoring and retention policies still need release validation before a real-customer pilot.
 
 ## Stack
 
@@ -155,7 +155,7 @@ The command queries the configured platform Twilio account, requires an existing
 
 Run `pnpm build`, then start the dashboard/API/worker with their package `start`/`worker` commands under a process supervisor. Set `NODE_ENV=production` in the deployment environment so production startup checks apply to both API and worker. Configure HTTPS `DASHBOARD_BASE_URL`, a fixed trusted `API_INTERNAL_URL`, `BETTER_AUTH_SECRET`, Resend and provider webhook secrets. Restrict backend ingress appropriately, share the auth secret across instances, protect the database, and redact auth/invitation link tokens from access logs.
 
-Phase 5 remains necessary for durable multi-instance SMS processing, operational limits, monitoring and release hardening. Account/membership protection is implemented; this is not a blanket production-security certification.
+Durable multi-instance communications use the same PostgreSQL worker as notifications. Operational limits, monitoring and live-provider release validation remain required; this is not a blanket production-security certification.
 
 ## Milestone 1: call notes and follow-ups
 
@@ -271,6 +271,15 @@ Configure your Twilio voice number to point at public HTTPS endpoints:
 
 - `POST https://your-public-url/webhooks/twilio/voice`
 - `POST https://your-public-url/webhooks/twilio/sms`
+- Delivery callbacks are attached by the worker to `POST https://your-public-url/webhooks/twilio/sms/status/:id`.
+
+### Durable communications
+
+Apply the `20261118230000_durable_communications` migration and deploy API and worker together; stop old webhook handlers during the cutover. SMS and missed-call webhooks acknowledge only after committing an event and its background job. AI qualification and Twilio API sends run in the existing worker. Run at least one worker; multiple workers coordinate through PostgreSQL, not process-local mutexes.
+
+Events are ordered by business and customer phone. Retries reuse persisted inbound messages and checkpointed qualification/outbound records. Failed or blocked head-of-line events intentionally pause that conversation until safely resolved. Provider acceptance, sending, delivery, failure and unknown outcomes are distinct in conversation history. An uncertain send is **not** automatically resent: Twilio Messaging has no application send-idempotency guarantee. Signed late callbacks can resolve uncertainty; inspect provider records before any manual recovery.
+
+`OPENAI_TIMEOUT_MS` defaults to 20000; `SMS_PROVIDER_TIMEOUT_MS` defaults to 15000. SDK-level automatic retries are disabled; the durable job controls bounded retries. Historical webhook markers are preserved without replaying messages, and historical outbound messages remain explicitly untracked.
 
 For local development you can expose the Express API with either ngrok or Cloudflare Tunnel.
 
@@ -292,8 +301,8 @@ Use the HTTPS URL from the tunnel provider in the Twilio webhook configuration.
 
 - Set `TWILIO_VALIDATE_SIGNATURES=false` only for local development.
 - Production should keep Twilio request validation enabled.
-- The voice flow forwards the inbound call with a 12-second timeout, then sends the recovery SMS only for `no-answer`, `busy`, or `failed` callback states.
-- Missed-call retries are protected by webhook idempotency plus recent-message duplicate suppression.
+- The voice flow forwards the inbound call with a 12-second timeout, then queues recovery only for `no-answer`, `busy`, or `failed` callback states.
+- Missed-call retries are protected by business-scoped call idempotency, ordered durable processing and recent-message duplicate suppression.
 - HVAC and renovation both use the same qualification engine. Behavior is selected with `getQualificationConfig(company)`.
 
 ## API Endpoints
@@ -356,18 +365,19 @@ Use the HTTPS URL from the tunnel provider in the Twilio webhook configuration.
 - `POST /webhooks/twilio/voice`
 - `POST /webhooks/twilio/voice/status`
 - `POST /webhooks/twilio/sms`
+- `POST /webhooks/twilio/sms/status/:id` (verified provider delivery callbacks)
 
 ## Demo Flow
 
 1. Customer calls the Twilio number.
 2. Twilio forwards to the configured business number.
 3. If nobody answers, Twilio calls the status callback.
-4. The API creates or reuses the lead and sends the recovery SMS.
+4. The API durably queues recovery; the worker creates or reuses the lead and submits the recovery SMS.
 5. Customer replies by SMS.
 6. Emergency messages are deterministically escalated.
-7. Non-emergency messages go through structured OpenAI qualification.
+7. Non-emergency messages go through background structured OpenAI qualification; the webhook does not wait for AI.
 8. Lead fields, messages, and dashboard views update from the same database.
 
 ## Production Gaps
 
-This release does not include subscription billing, payment collection, customer acceptance/signatures, jurisdiction-specific tax calculation/compliance certification, catalog file imports, CRM integrations, calendar booking, automatic team-invitation email delivery or distributed SMS processing. Basic business billing profiles and owner/staff access control are implemented. Validate production email/phone integrations, HTTPS/ingress, quotas, monitoring, backups and retention before a real-customer pilot.
+This release does not include subscription billing, payment collection, customer acceptance/signatures, jurisdiction-specific tax calculation/compliance certification, catalog file imports, CRM integrations, calendar booking or automatic team-invitation email delivery. Basic business billing profiles, owner/staff access control and durable distributed communications are implemented. Validate production email/phone integrations, HTTPS/ingress, quotas, monitoring, backups and retention before a real-customer pilot.

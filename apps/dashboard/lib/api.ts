@@ -13,6 +13,7 @@ import type {
   FollowUpSuggestion,
   WorkspaceSettings,
   BackgroundJobRecord,
+  SmsDeliveryRecord,
   DocumentPreparationInput,
   DocumentEmailPreview,
   DocumentEmailApproval,
@@ -157,6 +158,7 @@ export type Message = {
   direction: 'INBOUND' | 'OUTBOUND';
   body: string;
   createdAt: string;
+  smsDelivery?: SmsDeliveryRecord | null;
 };
 
 export type Lead = {

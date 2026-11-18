@@ -1,62 +1,22 @@
-/**
- * Lightweight in-process per-conversation sequential queue.
- *
- * Problem: Twilio may deliver multiple SMS messages for the same customer
- * nearly simultaneously. Without serialisation, two handlers could both
- * read the same stale lead state from the DB, run OpenAI in parallel, and
- * then both write back — causing qualification fields from the first message
- * to be lost or the second message to ask questions already answered.
- *
- * Solution: A promise-chain mutex keyed by conversation ID
- * (companyId + normalised phone).
- *
- *   Message A arrives → acquire lock → read DB → run AI → write DB → release
- *   Message B arrives → waits for A → reads UPDATED DB → run AI → write DB → release
- *
- * Properties:
- *  - Same key = sequential processing in arrival order.
- *  - Different keys = fully concurrent (no cross-conversation blocking).
- *  - Lock is always released in `finally`, so errors never permanently block.
- *  - Map entries are deleted when no further tasks are waiting (no memory leak).
- */
+import type { BackgroundJob, Prisma } from '@prisma/client';
 
-/** Maps conversation key → the tail of the pending promise chain for that key. */
-const chains = new Map<string, Promise<void>>();
-
-/**
- * Run `fn` exclusively for `key`.
- * Concurrent callers with the same key are queued and run one at a time.
- * Concurrent callers with different keys run in parallel.
- */
-export async function withConversationLock<T>(
-  key: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  // What was the last pending operation for this conversation?
-  const tail = chains.get(key) ?? Promise.resolve();
-
-  // Allocate a new completion signal so the next caller can chain off us.
-  let releaseTail!: () => void;
-  const newTail = new Promise<void>((resolve) => {
-    releaseTail = resolve;
-  });
-  chains.set(key, newTail);
-
-  // Wait for the previous tail to settle, then run our work.
-  return tail.then(async () => {
-    try {
-      return await fn();
-    } finally {
-      releaseTail(); // unblock any waiter that arrived after us
-      // If nobody else appended while we were running, clean up.
-      if (chains.get(key) === newTail) {
-        chains.delete(key);
-      }
-    }
-  });
+export class JobLeaseLostError extends Error {
+  constructor() {
+    super('The worker lease expired or was replaced. No conversation changes were committed.');
+    this.name = 'JobLeaseLostError';
+  }
 }
 
-/** Exposed only for tests — lets suites inspect internal state. */
-export function _getLockChainSizeForTesting(): number {
-  return chains.size;
+export async function assertJobLease(
+  db: Prisma.TransactionClient,
+  job: Pick<BackgroundJob, 'id' | 'leaseToken'>,
+): Promise<void> {
+  if (!job.leaseToken) throw new JobLeaseLostError();
+  // Fence every checkpoint, including the transition immediately before an external send.
+  const rows = await db.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "BackgroundJob"
+    WHERE "id" = ${job.id} AND "status" = 'RUNNING' AND "leaseToken" = ${job.leaseToken}
+      AND "leaseUntil" > (NOW() AT TIME ZONE 'UTC')
+    FOR UPDATE`;
+  if (!rows.length) throw new JobLeaseLostError();
 }

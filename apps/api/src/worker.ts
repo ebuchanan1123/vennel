@@ -23,6 +23,11 @@ import {
 import { processLeadFollowUpJob } from './services/lead-follow-up.service.js';
 import { HttpError } from './middleware/error-handler.js';
 import { prepareAccountEmail } from './services/account-email.service.js';
+import {
+  processCommunicationJob,
+  recordCommunicationFailure,
+} from './services/communication.service.js';
+import { JobLeaseLostError } from './services/conversation-lock.service.js';
 
 export async function runJob(job: BackgroundJob): Promise<void> {
   await prisma.jobAttempt.create({ data: { jobId: job.id, attempt: job.attempts } });
@@ -52,11 +57,20 @@ export async function runJob(job: BackgroundJob): Promise<void> {
       const providerId = await sendOwnerEmail({ ...job, firstAttemptAt }, email);
       if (job.kind === 'DOCUMENT_EMAIL') await recordDocumentEmailAcceptance(job, providerId);
       await finishBackgroundJob(job, { status: 'SUCCEEDED', providerId });
+    } else if (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY') {
+      await processCommunicationJob(job);
+      await finishBackgroundJob(job, { status: 'SUCCEEDED' });
     } else {
       await processLeadFollowUpJob(job);
       await finishBackgroundJob(job, { status: 'SUCCEEDED' });
     }
   } catch (error) {
+    if (error instanceof JobLeaseLostError) {
+      console.warn(
+        JSON.stringify({ event: 'job_lease_lost', jobId: job.id, companyId: job.companyId }),
+      );
+      return;
+    }
     const providerStatus =
       typeof error === 'object' &&
       error !== null &&
@@ -101,6 +115,8 @@ export async function runJob(job: BackgroundJob): Promise<void> {
         error: message,
       }),
     );
+    if (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY')
+      await recordCommunicationFailure(job, message, status !== 'PENDING');
     await finishBackgroundJob(job, { status, error: message });
   }
 }

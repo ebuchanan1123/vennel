@@ -27,6 +27,8 @@ const envSchema = z
     WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(1000),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
+    OPENAI_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60000).default(20000),
+    SMS_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(15000),
     TWILIO_ACCOUNT_SID: z.string().optional(),
     TWILIO_AUTH_TOKEN: z.string().optional(),
     TWILIO_PHONE_NUMBER: z.string().optional(),

@@ -108,6 +108,25 @@ enum BackgroundJobKind {
   OWNER_EMAIL
   DOCUMENT_EMAIL
   LEAD_FOLLOW_UP_SUGGESTIONS
+  INBOUND_SMS
+  MISSED_CALL_RECOVERY
+}
+
+enum CommunicationEventStatus {
+  RECEIVED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum SmsDeliveryStatus {
+  PENDING
+  SENDING
+  ACCEPTED
+  SENT
+  DELIVERED
+  FAILED
+  UNKNOWN
 }
 
 enum BackgroundJobStatus {
@@ -164,6 +183,8 @@ model Company {
   memberships             BusinessMembership[]
   invitations             BusinessInvitation[]
   membershipAudits        BusinessMembershipAudit[]
+  conversations           Conversation[]
+  webhookEvents           WebhookEvent[]
 
   @@index([slug])
   @@index([niche])
@@ -227,7 +248,10 @@ model Message {
   body      String
   createdAt DateTime         @default(now())
 
-  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  lead          Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  smsDelivery   SmsDelivery?
+  inboundEvent  WebhookEvent? @relation("InboundEventMessage")
+  outboundEvent WebhookEvent? @relation("OutboundEventMessage")
 
   @@index([leadId])
   @@index([createdAt])
@@ -343,14 +367,70 @@ model DocumentItem {
   @@index([serviceId])
 }
 
-model WebhookEvent {
-  id         String   @id @default(cuid())
-  eventType  String
-  externalId String   @unique
-  createdAt  DateTime @default(now())
+model Conversation {
+  id           String   @id @default(cuid())
+  companyId    String
+  phone        String
+  nextSequence Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  events  WebhookEvent[]
+
+  @@unique([companyId, phone])
+}
+
+model WebhookEvent {
+  id                String                   @id @default(cuid())
+  eventType         String
+  externalId        String                   @unique
+  companyId         String?
+  providerId        String?
+  conversationId    String?
+  sequence          Int?
+  payload           Json?
+  status            CommunicationEventStatus @default(RECEIVED)
+  attempts          Int                      @default(0)
+  lastError         String?
+  completedAt       DateTime?
+  inboundMessageId  String?                  @unique
+  outboundMessageId String?                  @unique
+  jobId             String?                  @unique
+  createdAt         DateTime                 @default(now())
+
+  company         Company?       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  conversation    Conversation?  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  job             BackgroundJob? @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  inboundMessage  Message?       @relation("InboundEventMessage", fields: [inboundMessageId], references: [id], onDelete: SetNull)
+  outboundMessage Message?       @relation("OutboundEventMessage", fields: [outboundMessageId], references: [id], onDelete: SetNull)
+
+  @@unique([companyId, eventType, providerId])
+  @@unique([conversationId, sequence])
+  @@index([conversationId, status, sequence])
   @@index([eventType])
   @@index([createdAt])
+}
+
+model SmsDelivery {
+  id             String            @id @default(cuid())
+  messageId      String            @unique
+  fromPhone      String
+  toPhone        String
+  status         SmsDeliveryStatus @default(PENDING)
+  providerId     String?           @unique
+  providerStatus String?
+  sendStartedAt  DateTime?
+  acceptedAt     DateTime?
+  deliveredAt    DateTime?
+  errorCode      String?
+  lastError      String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([status, updatedAt])
 }
 
 model CallNote {
@@ -519,10 +599,11 @@ model BackgroundJob {
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
 
-  company          Company?          @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  user             User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  history          JobAttempt[]
-  documentDelivery DocumentDelivery?
+  company            Company?          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user               User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history            JobAttempt[]
+  documentDelivery   DocumentDelivery?
+  communicationEvent WebhookEvent?
 
   @@unique([companyId, eventKey])
   @@unique([userId, eventKey])
