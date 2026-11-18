@@ -1,0 +1,36 @@
+{
+  "name": "@lead-recovery/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "worker": "node dist/worker.js",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "better-auth": "1.7.18",
+    "@lead-recovery/database": "workspace:*",
+    "@lead-recovery/types": "workspace:*",
+    "@prisma/client": "^6.13.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "openai": "^4.79.0",
+    "svix": "^1.84.0",
+    "twilio": "^5.4.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/multer": "^2.0.0",
+    "tsx": "^4.19.2",
+    "vitest": "^2.1.8"
+  }
+}

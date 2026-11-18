@@ -1,0 +1,24 @@
+{
+  "name": "@lead-recovery/database",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "prisma generate && tsc -p tsconfig.json --noEmit",
+    "test": "echo \"No database tests yet\""
+  },
+  "dependencies": {
+    "@prisma/client": "^6.13.0"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.7",
+    "prisma": "^6.13.0",
+    "tsx": "^4.19.2"
+  }
+}

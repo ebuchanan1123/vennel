@@ -1,0 +1,28 @@
+{
+  "name": "@lead-recovery/dashboard",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "start": "next start -p 3000",
+    "dev": "next dev -p 3000",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "better-auth": "1.7.18",
+    "@lead-recovery/types": "workspace:*",
+    "next": "15.1.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@lead-recovery/database": "workspace:*",
+    "@playwright/test": "^1.56.1",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17"
+  }
+}

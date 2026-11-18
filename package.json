@@ -1,0 +1,29 @@
+{
+  "name": "lead-recovery",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "accounts:email": "pnpm --filter @lead-recovery/api exec tsx src/scripts/account-admin.ts email",
+    "accounts:grant-owner": "pnpm --filter @lead-recovery/api exec tsx src/scripts/account-admin.ts grant-owner",
+    "accounts:assign-number": "pnpm --filter @lead-recovery/api exec tsx src/scripts/account-admin.ts assign-number",
+    "build": "turbo run build",
+    "db:generate": "pnpm --filter @lead-recovery/database db:generate",
+    "db:migrate": "pnpm --filter @lead-recovery/database db:migrate",
+    "db:seed": "pnpm --filter @lead-recovery/database db:seed",
+    "dev": "node scripts/dev.mjs",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "dotenv": "^16.4.7",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2"
+  }
+}

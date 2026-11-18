@@ -1,0 +1,75 @@
+import { config } from 'dotenv';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { z } from 'zod';
+
+const envCandidates = [resolve(process.cwd(), '../../.env'), resolve(process.cwd(), '.env')];
+
+for (const envPath of envCandidates) {
+  if (existsSync(envPath)) {
+    config({ path: envPath });
+    break;
+  }
+}
+
+const envSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    API_PORT: z.coerce.number().default(4000),
+    API_BASE_URL: z.string().url().default('http://localhost:4000'),
+    DATABASE_URL: z.string().min(1),
+    BETTER_AUTH_SECRET: z.string().min(32).optional(),
+    DASHBOARD_BASE_URL: z.string().url().default('http://localhost:3000'),
+    RESEND_API_KEY: z.string().optional(),
+    RESEND_FROM_EMAIL: z.string().email().optional(),
+    RESEND_WEBHOOK_SECRET: z.string().min(1).optional(),
+    OPENAI_TRANSCRIPTION_MODEL: z.string().default('gpt-transcribe'),
+    WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(1000),
+    OPENAI_API_KEY: z.string().optional(),
+    OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
+    TWILIO_ACCOUNT_SID: z.string().optional(),
+    TWILIO_AUTH_TOKEN: z.string().optional(),
+    TWILIO_PHONE_NUMBER: z.string().optional(),
+    TWILIO_SMS_REPLY_MODE: z.enum(['hardcoded', 'openai']).default('openai'),
+    DEMO_BUSINESS_PHONE: z.string().optional(),
+    TWILIO_VALIDATE_SIGNATURES: z
+      .string()
+      .default('true')
+      .transform((value) => value !== 'false'),
+  })
+  .superRefine((value, context) => {
+    if (value.NODE_ENV !== 'production') return;
+    if (!value.BETTER_AUTH_SECRET)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['BETTER_AUTH_SECRET'],
+        message: 'A persistent high-entropy auth secret is required in production.',
+      });
+    if (!value.DASHBOARD_BASE_URL.startsWith('https://'))
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['DASHBOARD_BASE_URL'],
+        message: 'Production sessions require an HTTPS application origin.',
+      });
+    if (!value.TWILIO_VALIDATE_SIGNATURES)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TWILIO_VALIDATE_SIGNATURES'],
+        message: 'Twilio signature verification cannot be disabled in production.',
+      });
+    if (!value.RESEND_API_KEY || !value.RESEND_FROM_EMAIL)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['RESEND_API_KEY'],
+        message: 'Production account verification requires a configured email provider.',
+      });
+  });
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error('Invalid environment variables', parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const env = parsed.data;

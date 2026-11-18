@@ -1,0 +1,709 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Niche {
+  HVAC
+  RENOVATION
+}
+
+enum LeadSource {
+  MISSED_CALL
+  SMS
+  WEB_FORM
+}
+
+enum LeadStatus {
+  NEW
+  QUALIFYING
+  QUALIFIED
+  NEEDS_HUMAN
+  BOOKED
+  CLOSED
+  DISQUALIFIED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum UrgencyLevel {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum LeadOutcome {
+  UNKNOWN
+  CONTACTED
+  ESTIMATE_SENT
+  BOOKED
+  WON
+  LOST
+}
+
+enum DocumentKind {
+  ESTIMATE
+  INVOICE
+}
+
+enum DocumentStatus {
+  DRAFT
+  FINALIZED
+}
+
+enum ServicePricingType {
+  FIXED
+  RANGE
+  QUOTE_REQUIRED
+}
+
+enum CallNoteSource {
+  TEXT
+  VOICE
+}
+
+enum CallNoteReviewStatus {
+  DRAFT
+  EXTRACTED
+  REVIEWED
+}
+
+enum FollowUpType {
+  CALL_CUSTOMER
+  SEND_ESTIMATE
+  CONFIRM_APPOINTMENT
+  REQUEST_INFORMATION
+  FOLLOW_UP_QUOTE
+  PREPARE_INVOICE
+  CUSTOM
+}
+
+enum FollowUpStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum FollowUpSource {
+  MANUAL
+  AI
+  AUTOMATION
+}
+
+enum SuggestionStatus {
+  PENDING
+  ACCEPTED
+  DISMISSED
+}
+
+enum BackgroundJobKind {
+  AUTH_EMAIL
+  OWNER_EMAIL
+  DOCUMENT_EMAIL
+  LEAD_FOLLOW_UP_SUGGESTIONS
+}
+
+enum BackgroundJobStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  BLOCKED
+  CANCELLED
+}
+
+enum BusinessRole {
+  OWNER
+  STAFF
+}
+
+model Company {
+  id                    String    @id @default(cuid())
+  name                  String
+  slug                  String    @unique
+  niche                 Niche
+  twilioPhoneNumber     String?   @unique
+  forwardToPhoneNumber  String?
+  serviceAreas          String[]
+  isActive              Boolean   @default(true)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  nextDocumentNumber    Int       @default(1)
+  timeZone              String    @default("UTC")
+  documentEmailEnabled  Boolean   @default(false)
+  documentSenderName    String?
+  documentReplyTo       String?
+  businessEmail         String?
+  businessPhone         String?
+  billingAddress        String?
+  taxRegistrationNumber String?
+  currency              String    @default("USD")
+  defaultTaxRate        Decimal   @default(0) @db.Decimal(5, 2)
+  onboardingStep        Int       @default(0)
+  onboardingCompletedAt DateTime?
+  onboardingTestedAt    DateTime?
+  createRequestKey      String?   @unique
+
+  leads                   Lead[]
+  customers               Customer[]
+  services                CatalogService[]
+  documents               BillingDocument[]
+  callNotes               CallNote[]
+  followUps               FollowUpTask[]
+  followUpSuggestions     FollowUpSuggestion[]
+  notificationPreferences NotificationPreference?
+  backgroundJobs          BackgroundJob[]
+  documentDeliveries      DocumentDelivery[]
+  memberships             BusinessMembership[]
+  invitations             BusinessInvitation[]
+  membershipAudits        BusinessMembershipAudit[]
+
+  @@index([slug])
+  @@index([niche])
+}
+
+model Lead {
+  id             String        @id @default(cuid())
+  companyId      String
+  customerId     String?
+  phone          String
+  source         LeadSource
+  status         LeadStatus    @default(NEW)
+  serviceType    String?
+  issue          String?
+  location       String?
+  urgency        UrgencyLevel?
+  preferredTime  String?
+  budgetRange    String?
+  projectType    String?
+  timeline       String?
+  propertyOwner  Boolean?
+  needsHuman     Boolean       @default(false)
+  summary        String?
+  lastActivityAt DateTime      @default(now())
+
+  // Commercial outcome — tracked separately from AI qualification status.
+  // A lead can be QUALIFIED but LOST, or QUALIFIED and later WON.
+  outcome        LeadOutcome @default(UNKNOWN)
+  estimatedValue Decimal?    @db.Decimal(10, 2)
+  actualValue    Decimal?    @db.Decimal(10, 2)
+  lostReason     String?
+  contactedAt    DateTime?
+  bookedAt       DateTime?
+  completedAt    DateTime?
+  crmExternalId  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company             Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer            Customer?            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  messages            Message[]
+  documents           BillingDocument[]
+  callNotes           CallNote[]
+  followUps           FollowUpTask[]
+  followUpSuggestions FollowUpSuggestion[]
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([phone])
+  @@index([status])
+  @@index([outcome])
+  @@index([lastActivityAt])
+  @@index([companyId, phone])
+}
+
+model Message {
+  id        String           @id @default(cuid())
+  leadId    String
+  direction MessageDirection
+  body      String
+  createdAt DateTime         @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@index([createdAt])
+}
+
+model Customer {
+  id         String   @id @default(cuid())
+  companyId  String
+  name       String
+  phone      String?
+  email      String?
+  address    String?
+  notes      String?
+  isArchived Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  company             Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  leads               Lead[]
+  documents           BillingDocument[]
+  callNotes           CallNote[]
+  followUps           FollowUpTask[]
+  followUpSuggestions FollowUpSuggestion[]
+
+  @@unique([companyId, phone])
+  @@unique([companyId, email])
+  @@index([companyId, isArchived])
+}
+
+model CatalogService {
+  id          String             @id @default(cuid())
+  companyId   String
+  name        String
+  description String?
+  category    String
+  unit        String             @default("job")
+  pricingType ServicePricingType @default(FIXED)
+  unitPrice   Decimal?           @db.Decimal(12, 2)
+  minPrice    Decimal?           @db.Decimal(12, 2)
+  maxPrice    Decimal?           @db.Decimal(12, 2)
+  keywords    String[]
+  isActive    Boolean            @default(true)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  items   DocumentItem[]
+
+  @@index([companyId, isActive])
+}
+
+model BillingDocument {
+  id               String         @id @default(cuid())
+  companyId        String
+  customerId       String?
+  leadId           String?
+  kind             DocumentKind
+  status           DocumentStatus @default(DRAFT)
+  number           String?
+  revision         Int            @default(1)
+  title            String
+  currency         String         @default("USD")
+  notes            String?
+  dueDate          DateTime?      @db.Date
+  discountAmount   Decimal        @default(0) @db.Decimal(12, 2)
+  taxRate          Decimal        @default(0) @db.Decimal(5, 2)
+  aiDraft          Json?
+  customerSnapshot Json?
+  businessName     String?
+  billingProfile   Json?
+  finalizedAt      DateTime?
+  finalizedBy      String?
+  sourceEstimateId String?        @unique
+  callNoteId       String?
+  contextSnapshot  Json?
+  preparationKey   String?
+  preparationHash  String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  company        Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer       Customer?          @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lead           Lead?              @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  items          DocumentItem[]
+  sourceEstimate BillingDocument?   @relation("EstimateInvoice", fields: [sourceEstimateId], references: [id], onDelete: Restrict)
+  invoice        BillingDocument?   @relation("EstimateInvoice")
+  callNote       CallNote?          @relation(fields: [callNoteId], references: [id], onDelete: SetNull)
+  deliveries     DocumentDelivery[]
+
+  @@unique([companyId, number])
+  @@unique([companyId, preparationKey])
+  @@index([companyId, status])
+  @@index([customerId])
+  @@index([leadId])
+  @@index([callNoteId])
+}
+
+model DocumentItem {
+  id               String   @id @default(cuid())
+  documentId       String
+  serviceId        String?
+  description      String
+  unit             String?
+  quantity         Decimal  @db.Decimal(10, 2)
+  unitPrice        Decimal? @db.Decimal(12, 2)
+  suggestionReason String?
+  position         Int
+
+  document BillingDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  service  CatalogService? @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  @@unique([documentId, position])
+  @@index([serviceId])
+}
+
+model WebhookEvent {
+  id         String   @id @default(cuid())
+  eventType  String
+  externalId String   @unique
+  createdAt  DateTime @default(now())
+
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model CallNote {
+  id                 String               @id @default(cuid())
+  companyId          String
+  customerId         String?
+  leadId             String?
+  originalText       String
+  text               String
+  source             CallNoteSource       @default(TEXT)
+  direction          MessageDirection     @default(INBOUND)
+  occurredAt         DateTime
+  phone              String?
+  revision           Int                  @default(1)
+  reviewStatus       CallNoteReviewStatus @default(DRAFT)
+  extraction         Json?
+  extractionRevision Int?
+  confirmedData      Json?
+  confirmedFields    String[]
+  reviewedAt         DateTime?
+  isArchived         Boolean              @default(false)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  company     Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer    Customer?            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lead        Lead?                @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  audits      CallNoteAudit[]
+  followUps   FollowUpTask[]
+  suggestions FollowUpSuggestion[]
+  documents   BillingDocument[]
+
+  @@index([companyId, occurredAt])
+  @@index([customerId])
+  @@index([leadId])
+}
+
+model CallNoteAudit {
+  id        String   @id @default(cuid())
+  noteId    String
+  revision  Int
+  action    String
+  actor     String
+  details   Json
+  createdAt DateTime @default(now())
+
+  note CallNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, createdAt])
+}
+
+model FollowUpTask {
+  id                 String         @id @default(cuid())
+  companyId          String
+  customerId         String
+  leadId             String?
+  callNoteId         String?
+  assignedUserId     String?
+  type               FollowUpType
+  title              String
+  dueAt              DateTime
+  status             FollowUpStatus @default(PENDING)
+  priority           UrgencyLevel   @default(NORMAL)
+  notes              String?
+  source             FollowUpSource @default(MANUAL)
+  revision           Int            @default(1)
+  sourceSuggestionId String?        @unique
+  completedAt        DateTime?
+  cancelledAt        DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  company      Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer     Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lead         Lead?               @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  callNote     CallNote?           @relation(fields: [callNoteId], references: [id], onDelete: SetNull)
+  suggestion   FollowUpSuggestion? @relation(fields: [sourceSuggestionId], references: [id], onDelete: Restrict)
+  audits       FollowUpAudit[]
+  assignedUser User?               @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, status, dueAt])
+  @@index([customerId])
+  @@index([leadId])
+  @@index([callNoteId])
+}
+
+model FollowUpAudit {
+  id        String   @id @default(cuid())
+  taskId    String
+  revision  Int
+  actor     String
+  action    String
+  details   Json
+  createdAt DateTime @default(now())
+
+  task FollowUpTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+}
+
+model FollowUpSuggestion {
+  id         String           @id @default(cuid())
+  companyId  String
+  customerId String?
+  leadId     String?
+  callNoteId String?
+  sourceKey  String
+  type       FollowUpType
+  title      String
+  dueAt      DateTime?
+  dueText    String?
+  priority   UrgencyLevel     @default(NORMAL)
+  evidence   String?
+  source     FollowUpSource
+  status     SuggestionStatus @default(PENDING)
+  reviewedAt DateTime?
+  createdAt  DateTime         @default(now())
+
+  company  Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  lead     Lead?         @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  callNote CallNote?     @relation(fields: [callNoteId], references: [id], onDelete: SetNull)
+  task     FollowUpTask?
+
+  @@unique([companyId, sourceKey])
+  @@index([companyId, status])
+  @@index([customerId])
+  @@index([leadId])
+  @@index([callNoteId])
+}
+
+model NotificationPreference {
+  companyId             String    @id
+  enabled               Boolean   @default(false)
+  recipientEmail        String?
+  consentedAt           DateTime?
+  newLeads              Boolean   @default(true)
+  humanAttention        Boolean   @default(true)
+  overdueFollowUps      Boolean   @default(true)
+  documentReview        Boolean   @default(true)
+  documentReminderHours Int       @default(24)
+  optOutToken           String    @unique @default(uuid())
+  updatedAt             DateTime  @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+model BackgroundJob {
+  id              String              @id @default(cuid())
+  companyId       String?
+  userId          String?
+  kind            BackgroundJobKind
+  eventKey        String
+  payload         Json
+  deliveryPayload Json?
+  status          BackgroundJobStatus @default(PENDING)
+  dueAt           DateTime            @default(now())
+  attempts        Int                 @default(0)
+  maxAttempts     Int                 @default(5)
+  leaseToken      String?
+  leaseUntil      DateTime?
+  firstAttemptAt  DateTime?
+  completedAt     DateTime?
+  lastError       String?
+  providerId      String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  company          Company?          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user             User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  history          JobAttempt[]
+  documentDelivery DocumentDelivery?
+
+  @@unique([companyId, eventKey])
+  @@unique([userId, eventKey])
+  @@index([status, dueAt])
+  @@index([leaseUntil])
+}
+
+model JobAttempt {
+  id         String    @id @default(cuid())
+  jobId      String
+  attempt    Int
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  outcome    String?
+  error      String?
+  providerId String?
+
+  job BackgroundJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, attempt])
+}
+
+model WorkerHeartbeat {
+  id         String   @id
+  lastSeenAt DateTime @default(now())
+  startedAt  DateTime @default(now())
+}
+
+model DocumentDelivery {
+  id               String    @id @default(cuid())
+  companyId        String
+  documentId       String
+  documentRevision Int
+  requestKey       String
+  recipientEmail   String
+  senderName       String
+  senderEmail      String
+  replyTo          String?
+  documentSnapshot Json
+  previewHash      String
+  approvedAt       DateTime  @default(now())
+  approvedBy       String
+  jobId            String    @unique
+  providerId       String?   @unique
+  acceptedAt       DateTime?
+
+  company  Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  document BillingDocument         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  job      BackgroundJob           @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  events   DocumentDeliveryEvent[]
+
+  @@unique([companyId, requestKey])
+  @@index([companyId, documentId, approvedAt])
+}
+
+model DocumentDeliveryEvent {
+  id         String   @id
+  providerId String
+  deliveryId String?
+  type       String
+  occurredAt DateTime
+  receivedAt DateTime @default(now())
+
+  delivery DocumentDelivery? @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@index([providerId])
+  @@index([deliveryId, occurredAt])
+}
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions       Session[]
+  accounts       Account[]
+  memberships    BusinessMembership[]
+  assignedTasks  FollowUpTask[]
+  backgroundJobs BackgroundJob[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+}
+
+model BusinessMembership {
+  id        String       @id @default(cuid())
+  companyId String
+  userId    String
+  role      BusinessRole @default(STAFF)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@index([userId])
+}
+
+model BusinessInvitation {
+  id         String       @id @default(cuid())
+  companyId  String
+  email      String
+  role       BusinessRole @default(STAFF)
+  tokenHash  String       @unique
+  invitedBy  String
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  acceptedBy String?
+  revokedAt  DateTime?
+  createdAt  DateTime     @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, email])
+}
+
+model BusinessMembershipAudit {
+  id        String   @id @default(cuid())
+  companyId String
+  actorId   String
+  action    String
+  details   Json
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, createdAt])
+}
