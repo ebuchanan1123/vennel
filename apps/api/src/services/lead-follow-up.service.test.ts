@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Lead } from '@prisma/client';
 import { prisma } from '@lead-recovery/database';
 
-const mocks = vi.hoisted(() => ({ enqueue: vi.fn(), notify: vi.fn() }));
+const mocks = vi.hoisted(() => ({ enqueue: vi.fn(), notify: vi.fn(), messageCount: vi.fn() }));
+vi.mock('@lead-recovery/database', () => ({ prisma: { message: { count: mocks.messageCount } } }));
 vi.mock('./background-job.service.js', () => ({ enqueueBackgroundJob: mocks.enqueue }));
 vi.mock('./notification.service.js', () => ({ enqueueOwnerNotification: mocks.notify }));
 import { recordLeadCreated, recordLeadMilestone } from './lead-follow-up.service.js';
@@ -38,7 +39,10 @@ const lead: Lead = {
   createdAt: date,
   updatedAt: date,
 };
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.messageCount.mockResolvedValue(1);
+});
 describe('lead milestone side effects', () => {
   it('creates only an owner-notification event for a newly captured lead', async () => {
     await recordLeadCreated(prisma, lead);
@@ -75,5 +79,16 @@ describe('lead milestone side effects', () => {
       expect.stringContaining('human-attention:lead-a:'),
       { kind: 'HUMAN_ATTENTION', leadId: lead.id },
     ]);
+  });
+  it('does not enqueue AI follow-ups for a recovery failure before any customer reply', async () => {
+    mocks.messageCount.mockResolvedValue(0);
+    await recordLeadMilestone(prisma, lead, {
+      ...lead,
+      source: 'MISSED_CALL',
+      status: 'NEEDS_HUMAN',
+      needsHuman: true,
+    });
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    expect(mocks.enqueue).not.toHaveBeenCalled();
   });
 });

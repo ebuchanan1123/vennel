@@ -33,7 +33,8 @@ export async function recordLeadMilestone(
   }
   if (
     previous.status !== lead.status &&
-    (lead.status === 'QUALIFIED' || lead.status === 'NEEDS_HUMAN')
+    (lead.status === 'QUALIFIED' || lead.status === 'NEEDS_HUMAN') &&
+    (await db.message.count({ where: { leadId: lead.id, direction: 'INBOUND' } })) > 0
   ) {
     await enqueueBackgroundJob(
       db,

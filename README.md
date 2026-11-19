@@ -19,6 +19,9 @@ AI-powered missed-call recovery, customer management, and owner-reviewed estimat
 
 ## Stack
 
+For verified findings, guarantees, rollout, provider activation, recovery and
+remaining pilot blockers, see [Production readiness and operations](PRODUCTION-READINESS.md).
+
 - TypeScript monorepo with pnpm and Turborepo
 - Express API
 - Next.js dashboard
@@ -265,6 +268,17 @@ RUN_DATABASE_TESTS=true pnpm --filter @lead-recovery/api test -- src/services/ac
 
 Those integration tests are explicitly skipped without `RUN_DATABASE_TESTS=true`; a skipped test is not a pass.
 
+The communications failure scenarios are also backed by isolated PostgreSQL:
+
+```bash
+RUN_DATABASE_TESTS=true pnpm --filter @lead-recovery/api test -- src/services/communications.integration.test.ts
+```
+
+`PLAYWRIGHT_BASE_URL` can override the browser test origin when validating on a
+separate local port. Run the API, dashboard and fixtures against the same isolated
+local database and matching application origin/auth secret; do not point browser
+fixtures at production data.
+
 ## Twilio Webhooks
 
 Configure your Twilio voice number to point at public HTTPS endpoints:
@@ -374,7 +388,7 @@ Use the HTTPS URL from the tunnel provider in the Twilio webhook configuration.
 - `GET/PATCH /api/workspace/:companyId/settings`
 - `GET /api/workspace/:companyId/jobs`
 - `POST /api/workspace/:companyId/jobs/:id/retry`
-- `POST /api/workspace/:companyId/sms-deliveries/:id/reconcile` (owner-only provider lookup or explicit verified-unsent retry)
+- `POST /api/workspace/:companyId/sms-deliveries/:id/reconcile` (owner-only provider lookup or explicit verified-unsent retry; returns the committed delivery state)
 - `GET/POST /api/notifications/unsubscribe/:token` (scoped capability link, no workspace data access)
 - `POST /webhooks/twilio/voice`
 - `POST /webhooks/twilio/voice/status`

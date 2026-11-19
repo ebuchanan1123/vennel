@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import type { Company } from '../lib/api';
@@ -36,7 +36,6 @@ export function AppShell({
 }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState('');
@@ -206,7 +205,8 @@ export function AppShell({
               value={company?.id ?? ''}
               disabled={activeCompanies.length === 0}
               onChange={(event) => {
-                router.push(workspaceHref('/', event.target.value));
+                // Discard cached client state and permissions from the previous workspace.
+                globalThis.location.assign(workspaceHref('/', event.target.value));
                 setMenuOpen(false);
               }}
               className="w-full min-w-0 cursor-pointer bg-transparent text-sm font-semibold text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"

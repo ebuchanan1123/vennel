@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { prisma } from '@lead-recovery/database';
-import { test, expect, grantTestOwner } from './account-fixtures';
+import { APP_ORIGIN, test, expect, grantTestOwner } from './account-fixtures';
 import { emptyCallNoteExtraction } from '@lead-recovery/types';
 
 config({ path: '../../.env' });
@@ -186,11 +186,24 @@ test('AI suggestions require explicit replacement approval and preserve proposal
 
 test('public-looking gateway requests and forged public-view headers do not expose business data', async ({
   request,
+  browser,
 }) => {
-  const external = await request.get('/api/backend/api/companies', {
-    headers: { 'x-forwarded-for': '203.0.113.10' },
+  const anonymous = await browser.newContext({
+    baseURL: APP_ORIGIN,
+    storageState: { cookies: [], origins: [] },
   });
-  expect(external.status()).toBe(403);
+  try {
+    const external = await anonymous.request.get('/api/backend/api/companies', {
+      headers: {
+        'x-forwarded-for': '203.0.113.10',
+        'x-workspace-public-view': 'notifications',
+      },
+    });
+    expect([401, 403]).toContain(external.status());
+    expect(await external.text()).not.toContain(companyId);
+  } finally {
+    await anonymous.close();
+  }
   const response = await request.get(`/?companyId=${companyId}`, {
     headers: { 'x-workspace-public-view': 'notifications' },
   });

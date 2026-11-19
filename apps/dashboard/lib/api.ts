@@ -578,12 +578,12 @@ export function createApi(cookie?: string) {
       method: 'POST',
     });
   }
-  async function reconcileSmsDelivery(
+  function reconcileSmsDelivery(
     companyId: string,
     id: string,
     input: SmsReconciliationInput,
-  ): Promise<void> {
-    await apiRequest(
+  ): Promise<SmsDeliveryRecord> {
+    return apiFetch(
       workspacePath(companyId, `/sms-deliveries/${encodeURIComponent(id)}/reconcile`),
       {
         method: 'POST',

@@ -64,7 +64,7 @@ export function WorkspaceSettingsView({
     <>
       <PageHeader
         title="Workspace settings"
-        description="Business-local scheduling and opt-in transactional owner notifications. Customer messages remain owner-controlled."
+        description="Business-local scheduling, opt-in owner emails and background workflow health."
       />
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <form className="panel space-y-5 p-6" onSubmit={save}>
@@ -255,7 +255,7 @@ export function WorkspaceSettingsView({
           <p
             className={`text-xs ${documentEmail.webhookConfigured ? 'text-emerald-700' : 'text-amber-700'}`}
           >
-            Verified delivery callbacks:{' '}
+            Verified document-email callbacks:{' '}
             {documentEmail.webhookConfigured
               ? 'configured'
               : 'not configured; only provider acceptance can be confirmed'}
@@ -267,17 +267,21 @@ export function WorkspaceSettingsView({
             </p>
           )}
           <p className="text-[11px] leading-relaxed text-steel">
-            Jobs are durable in PostgreSQL. Retries reuse a fixed provider idempotency key and stop
-            before its 24-hour retention window expires.
+            Jobs are durable in PostgreSQL. Email retries reuse a provider idempotency key within
+            its safe retry window. SMS is retried automatically only when non-acceptance is known;
+            uncertain SMS sends require review.
           </p>
           <p className="text-[11px] leading-relaxed text-steel">
-            Local developer access is not production account authentication. No real-customer pilot
-            until business memberships and authorization are implemented.
+            Business memberships and owner permissions are enforced. Validate live providers,
+            ingress controls, monitoring and backup recovery before a real-customer pilot.
           </p>
         </aside>
       </div>
       <section className="panel mt-6 p-5">
         <h2 className="mb-4 text-sm font-semibold">Background processing &amp; attempt history</h2>
+        <p className="mb-4 text-xs text-steel">
+          Failed and blocked jobs appear first, followed by recent work. Up to 100 jobs are shown.
+        </p>
         {jobs.length === 0 ? (
           <p className="text-xs text-steel">No background jobs for this business yet.</p>
         ) : (

@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import type { ReactNode } from 'react';
 
 import { Icon } from './icon';
@@ -39,9 +38,9 @@ export function OnboardingShell({
           </div>
           <div className="flex items-center gap-4 text-xs">
             {exitHref && (
-              <Link href={exitHref} className="font-medium text-ember">
+              <a href={exitHref} className="font-medium text-ember">
                 Back to workspace
-              </Link>
+              </a>
             )}
             <span className="hidden max-w-40 truncate text-steel sm:block">{accountName}</span>
             <button

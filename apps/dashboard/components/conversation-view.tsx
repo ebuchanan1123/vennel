@@ -1,7 +1,7 @@
 import type { SmsDeliveryRecord } from '@lead-recovery/types';
 
 import { Icon } from './icon';
-import { SmsDeliveryActions } from './sms-delivery-actions';
+import { SmsDeliveryPanel } from './sms-delivery-panel';
 
 type ConversationMessage = {
   id: string;
@@ -9,16 +9,6 @@ type ConversationMessage = {
   body: string;
   createdAt: string;
   smsDelivery?: SmsDeliveryRecord | null;
-};
-
-const deliveryLabels: Record<SmsDeliveryRecord['status'], string> = {
-  PENDING: 'Pending send',
-  SENDING: 'Submitting to provider',
-  ACCEPTED: 'Provider accepted - delivery not confirmed',
-  SENT: 'Sent by provider - delivery not confirmed',
-  DELIVERED: 'Delivered',
-  FAILED: 'Delivery failed - needs attention',
-  UNKNOWN: 'Provider outcome unknown - needs review',
 };
 
 export function ConversationView({
@@ -74,21 +64,18 @@ export function ConversationView({
                   )}
                 </p>
                 <p className="whitespace-pre-wrap break-words leading-relaxed">{message.body}</p>
-                {!inbound && (
-                  <p className="mt-1 text-[10px] text-indigo-100">
-                    {message.smsDelivery
-                      ? deliveryLabels[message.smsDelivery.status]
-                      : 'Delivery not tracked (historical message)'}
-                    {message.smsDelivery?.lastError ? ` / ${message.smsDelivery.lastError}` : ''}
-                  </p>
-                )}
                 {!inbound &&
-                  companyId &&
-                  canManageSms &&
-                  message.smsDelivery &&
-                  message.smsDelivery.status !== 'DELIVERED' && (
-                    <SmsDeliveryActions companyId={companyId} delivery={message.smsDelivery} />
-                  )}
+                  (message.smsDelivery ? (
+                    <SmsDeliveryPanel
+                      companyId={companyId}
+                      delivery={message.smsDelivery}
+                      canManage={canManageSms}
+                    />
+                  ) : (
+                    <p className="mt-1 text-[10px] text-indigo-100">
+                      Delivery not tracked (historical message)
+                    </p>
+                  ))}
                 <p
                   className={`mt-2.5 text-[10px] ${inbound ? 'text-slate-400' : 'text-indigo-100'}`}
                 >

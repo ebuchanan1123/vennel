@@ -488,6 +488,9 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
       expect(blocked.status).toBe('BLOCKED');
       expect(await delivery()).toMatchObject({ status: 'UNKNOWN', providerId: null });
       expect(await database.lead.findFirst()).toMatchObject({ needsHuman: true });
+      expect(
+        await database.backgroundJob.count({ where: { kind: 'LEAD_FOLLOW_UP_SUGGESTIONS' } }),
+      ).toBe(0);
       await expect(retry(companyId, blocked.id)).rejects.toMatchObject({ status: 409 });
       await post(path, body, 1);
       expect(provider.send).toHaveBeenCalledTimes(1);
@@ -695,19 +698,22 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
     expect(provider.send).not.toHaveBeenCalled();
   });
 
-  it('continues forwarding calls with unavailable caller ID without attempting an invalid recovery SMS', async () => {
-    const body = call({ From: 'anonymous' });
-    expect((await post('/webhooks/twilio/voice', body)).status).toBe(200);
-    expect(
-      (await post('/webhooks/twilio/voice/status?companySlug=isolated-hvac', body)).status,
-    ).toBe(200);
-    expect(await runNext()).toMatchObject({ status: 'SUCCEEDED' });
-    expect(await database.webhookEvent.findFirst()).toMatchObject({
-      status: 'COMPLETED',
-      lastError: expect.stringContaining('caller ID'),
-    });
-    expect(provider.send).not.toHaveBeenCalled();
-  });
+  it.each(['anonymous', 'client:synthetic-caller', 'sip:caller@example.test'])(
+    'continues forwarding non-SMS caller ID %s without attempting recovery SMS',
+    async (from) => {
+      const body = call({ From: from });
+      expect((await post('/webhooks/twilio/voice', body)).status).toBe(200);
+      expect(
+        (await post('/webhooks/twilio/voice/status?companySlug=isolated-hvac', body)).status,
+      ).toBe(200);
+      expect(await runNext()).toMatchObject({ status: 'SUCCEEDED' });
+      expect(await database.webhookEvent.findFirst()).toMatchObject({
+        status: 'COMPLETED',
+        lastError: expect.stringContaining('caller ID'),
+      });
+      expect(provider.send).not.toHaveBeenCalled();
+    },
+  );
 
   it('never sends model-generated prices, bookings or commitments to customers', async () => {
     const unsafe = 'The price is $125 and your appointment is confirmed for tomorrow.';
@@ -813,9 +819,19 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
     await post('/webhooks/twilio/sms', sms());
     await runNext();
     const unknown = await delivery();
-    await reconcile(companyId, unknown.id, 'verified-owner', {
+    const queued = await reconcile(companyId, unknown.id, 'verified-owner', {
       action: 'CONFIRM_NOT_SENT',
       approved: true,
+    });
+    expect(queued).toEqual({
+      id: unknown.id,
+      status: 'PENDING',
+      providerId: null,
+      providerStatus: null,
+      acceptedAt: null,
+      deliveredAt: null,
+      lastError: null,
+      errorCode: null,
     });
     await runNext();
     expect(await delivery()).toMatchObject({ id: unknown.id, status: 'ACCEPTED' });
@@ -1074,4 +1090,33 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
       }
     },
   );
+
+  it('keeps an older blocked job visible after more than 100 newer successful jobs', async () => {
+    const blocked = await database.backgroundJob.create({
+      data: {
+        companyId,
+        kind: 'INBOUND_SMS',
+        eventKey: 'old-blocked-event',
+        payload: {},
+        status: 'BLOCKED',
+        lastError: 'Operator review is required.',
+        createdAt: new Date(Date.now() - 86400000),
+      },
+    });
+    await database.backgroundJob.createMany({
+      data: Array.from({ length: 125 }, (_, index) => ({
+        companyId,
+        kind: 'SMS_STATUS_RECONCILIATION',
+        eventKey: `new-completed-${index}`,
+        payload: {},
+        status: 'SUCCEEDED',
+      })),
+    });
+    const listed = await (
+      await import('./background-job.service.js')
+    ).listBackgroundJobs(companyId);
+    expect(listed).toHaveLength(100);
+    expect(listed[0]).toMatchObject({ id: blocked.id, status: 'BLOCKED' });
+    expect(listed.every((job) => job.id === blocked.id || job.status === 'SUCCEEDED')).toBe(true);
+  });
 });

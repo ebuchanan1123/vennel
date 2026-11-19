@@ -237,12 +237,31 @@ export async function finishBackgroundJob(
 }
 
 export async function listBackgroundJobs(companyId: string): Promise<BackgroundJobRecord[]> {
-  const jobs = await prisma.backgroundJob.findMany({
-    where: { companyId },
-    include: { history: { orderBy: { attempt: 'desc' } } },
-    orderBy: { createdAt: 'desc' },
-    take: 100,
-  });
+  const include = {
+    history: { orderBy: { attempt: 'desc' } },
+  } satisfies Prisma.BackgroundJobInclude;
+  const attentionStatuses = ['FAILED', 'BLOCKED'] satisfies BackgroundJob['status'][];
+  const jobs = await prisma.$transaction(
+    async (tx) => {
+      const attention = await tx.backgroundJob.findMany({
+        where: { companyId, status: { in: attentionStatuses } },
+        include,
+        orderBy: { createdAt: 'asc' },
+        take: 100,
+      });
+      const recent =
+        attention.length < 100
+          ? await tx.backgroundJob.findMany({
+              where: { companyId, status: { notIn: attentionStatuses } },
+              include,
+              orderBy: { createdAt: 'desc' },
+              take: 100 - attention.length,
+            })
+          : [];
+      return [...attention, ...recent];
+    },
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  );
   return jobs.map((job) => ({
     id: job.id,
     kind: job.kind,

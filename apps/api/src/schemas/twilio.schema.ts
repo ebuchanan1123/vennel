@@ -12,7 +12,7 @@ const accountSid = z
 export const twilioVoiceSchema = z.object({
   CallSid: callSid,
   AccountSid: accountSid,
-  From: z.union([phone, z.enum(['anonymous', 'unknown', 'restricted'])]),
+  From: z.string().min(1).max(256),
   To: phone,
 });
 

@@ -25,13 +25,14 @@ businessAdminRouter.post(
   '/sms-deliveries/:id/reconcile',
   asyncHandler(async (req, res) => {
     const { companyId, id } = recordParamsSchema.parse(req.params);
-    await reconcileSmsDelivery(
-      companyId,
-      id,
-      currentAccount(req).id,
-      smsReconciliationSchema.parse(req.body),
+    res.json(
+      await reconcileSmsDelivery(
+        companyId,
+        id,
+        currentAccount(req).id,
+        smsReconciliationSchema.parse(req.body),
+      ),
     );
-    res.status(204).send();
   }),
 );
 businessAdminRouter.get(

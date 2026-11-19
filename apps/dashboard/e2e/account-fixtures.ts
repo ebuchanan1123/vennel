@@ -8,7 +8,8 @@ import { accountEmailSchema } from '../../api/src/services/account-email.service
 import { test as base, expect } from '@playwright/test';
 
 config({ path: '../../.env' });
-export const APP_ORIGIN = 'http://localhost:3000';
+export const APP_ORIGIN = new URL(process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3000')
+  .origin;
 export type TestAccount = { id: string; email: string; password: string; name: string };
 let fixtureAuth: ReturnType<typeof createAccountAuth> | undefined;
 function auth() {
@@ -65,7 +66,7 @@ export async function accountStorageState(account: TestAccount) {
       {
         name: pair.slice(0, separator),
         value: pair.slice(separator + 1),
-        domain: 'localhost',
+        domain: new URL(APP_ORIGIN).hostname,
         path: '/',
         expires: -1,
         httpOnly: true,

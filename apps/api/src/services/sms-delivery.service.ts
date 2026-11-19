@@ -1,5 +1,6 @@
 import { prisma } from '@lead-recovery/database';
-import type { BackgroundJob, Prisma, SmsDeliveryStatus } from '@prisma/client';
+import type { BackgroundJob, Prisma, SmsDelivery, SmsDeliveryStatus } from '@prisma/client';
+import type { SmsDeliveryRecord } from '@lead-recovery/types';
 
 import { env } from '../env.js';
 import { HttpError } from '../middleware/error-handler.js';
@@ -305,13 +306,26 @@ export const smsReconciliationSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('CONFIRM_NOT_SENT'), approved: z.literal(true) }).strict(),
 ]);
 
+function serializeSmsDelivery(delivery: SmsDelivery): SmsDeliveryRecord {
+  return {
+    id: delivery.id,
+    status: delivery.status,
+    providerId: delivery.providerId,
+    providerStatus: delivery.providerStatus,
+    acceptedAt: delivery.acceptedAt?.toISOString() ?? null,
+    deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
+    lastError: delivery.lastError,
+    errorCode: delivery.errorCode,
+  };
+}
+
 export async function reconcileSmsDelivery(
   companyId: string,
   id: string,
   actorId: string,
   input: z.infer<typeof smsReconciliationSchema>,
   provider: SmsProvider = smsProvider,
-): Promise<void> {
+): Promise<SmsDeliveryRecord> {
   const delivery = await prisma.smsDelivery.findFirst({
     where: { id, message: { lead: { companyId } } },
     include: { message: { include: { outboundEvent: true } } },
@@ -340,7 +354,7 @@ export async function reconcileSmsDelivery(
     });
     if (receipt.body !== delivery.message.body)
       throw new HttpError(409, 'The provider receipt does not match the recorded SMS content.');
-    await prisma.$transaction(async (tx) => {
+    const updated = await prisma.$transaction(async (tx) => {
       await recordSmsStatus(
         id,
         {
@@ -355,10 +369,11 @@ export async function reconcileSmsDelivery(
       await tx.smsDeliveryReview.create({
         data: { deliveryId: id, actorId, action: input.action, providerId: receipt.id },
       });
+      return tx.smsDelivery.findUniqueOrThrow({ where: { id } });
     });
-    return;
+    return serializeSmsDelivery(updated);
   }
-  await prisma.$transaction(async (tx) => {
+  const updated = await prisma.$transaction(async (tx) => {
     const jobId = delivery.message.outboundEvent?.jobId;
     if (!jobId) throw new HttpError(409, 'This SMS has no recoverable sending job.');
     await tx.$queryRaw`SELECT "id" FROM "BackgroundJob" WHERE "id" = ${jobId} FOR UPDATE`;
@@ -373,7 +388,7 @@ export async function reconcileSmsDelivery(
         409,
         'Only a stopped, uncertain send with no provider receipt can be authorized again.',
       );
-    await tx.smsDelivery.update({
+    const updatedDelivery = await tx.smsDelivery.update({
       where: { id },
       data: { status: 'PENDING', lastError: null, sendStartedAt: null },
     });
@@ -398,5 +413,7 @@ export async function reconcileSmsDelivery(
         actorId,
       }),
     );
+    return updatedDelivery;
   });
+  return serializeSmsDelivery(updated);
 }
