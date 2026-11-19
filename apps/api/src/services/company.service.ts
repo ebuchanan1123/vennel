@@ -1,7 +1,7 @@
 import { prisma } from '@lead-recovery/database';
 import type { Company } from '@prisma/client';
 
-function normalizePhone(value: string): string {
+export function normalizePhone(value: string): string {
   return value.replace(/[^\d+]/g, '');
 }
 

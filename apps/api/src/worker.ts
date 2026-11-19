@@ -2,12 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as wait } from 'node:timers/promises';
 import { prisma } from '@lead-recovery/database';
 import type { BackgroundJob } from '@prisma/client';
+import { ZodError } from 'zod';
 
 import { env } from './env.js';
 import {
   claimBackgroundJob,
   finishBackgroundJob,
+  renewBackgroundJobLease,
+  reapExpiredBackgroundJobs,
   EMAIL_RETRY_WINDOW_MS,
+  LEASE_MS,
 } from './services/background-job.service.js';
 import {
   emailConfigured,
@@ -27,11 +31,49 @@ import {
   processCommunicationJob,
   recordCommunicationFailure,
 } from './services/communication.service.js';
-import { JobLeaseLostError } from './services/conversation-lock.service.js';
+import { assertJobLease, JobLeaseLostError } from './services/conversation-lock.service.js';
+import { processSmsReconciliation } from './services/sms-delivery.service.js';
+import { ProviderUsageLimitError } from './services/provider-usage.service.js';
+
+function maintainLease(job: BackgroundJob): () => Promise<void> {
+  let renewing: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    if (renewing) return;
+    renewing = renewBackgroundJobLease(job)
+      .then((renewed) => {
+        if (!renewed) console.warn(JSON.stringify({ event: 'job_lease_lost', jobId: job.id }));
+      })
+      .catch((error: unknown) => {
+        console.error(
+          JSON.stringify({
+            event: 'job_lease_renewal_failed',
+            jobId: job.id,
+            errorType: error instanceof Error ? error.name : 'Unknown',
+          }),
+        );
+      })
+      .finally(() => {
+        renewing = undefined;
+      });
+  }, LEASE_MS / 3);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    await renewing;
+  };
+}
 
 export async function runJob(job: BackgroundJob): Promise<void> {
-  await prisma.jobAttempt.create({ data: { jobId: job.id, attempt: job.attempts } });
+  const stopHeartbeat = maintainLease(job);
+  const communication = job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY';
   try {
+    await prisma.$transaction((tx) => assertJobLease(tx, job));
+    await prisma.jobAttempt.upsert({
+      where: { jobId_attempt: { jobId: job.id, attempt: job.attempts } },
+      create: { jobId: job.id, attempt: job.attempts },
+      update: {},
+    });
+    let providerId: string | undefined;
     if (job.kind === 'AUTH_EMAIL' || job.kind === 'OWNER_EMAIL' || job.kind === 'DOCUMENT_EMAIL') {
       const email =
         job.kind === 'AUTH_EMAIL'
@@ -49,21 +91,34 @@ export async function runJob(job: BackgroundJob): Promise<void> {
       if (!emailConfigured())
         throw new ProviderFailure('Resend is not configured. No email was sent.', false, true);
       const firstAttemptAt = job.firstAttemptAt ?? new Date();
-      const claimed = await prisma.backgroundJob.updateMany({
-        where: { id: job.id, leaseToken: job.leaseToken, status: 'RUNNING' },
-        data: { deliveryPayload: email, firstAttemptAt },
+      await prisma.$transaction(async (tx) => {
+        await assertJobLease(tx, job);
+        await tx.backgroundJob.update({
+          where: { id: job.id },
+          data: { deliveryPayload: email, firstAttemptAt },
+        });
       });
-      if (!claimed.count) throw new ProviderFailure('The delivery lease was lost.', false);
-      const providerId = await sendOwnerEmail({ ...job, firstAttemptAt }, email);
+      providerId = await sendOwnerEmail({ ...job, firstAttemptAt }, email);
       if (job.kind === 'DOCUMENT_EMAIL') await recordDocumentEmailAcceptance(job, providerId);
-      await finishBackgroundJob(job, { status: 'SUCCEEDED', providerId });
-    } else if (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY') {
+    } else if (communication) {
       await processCommunicationJob(job);
-      await finishBackgroundJob(job, { status: 'SUCCEEDED' });
-    } else {
+    } else if (job.kind === 'SMS_STATUS_RECONCILIATION') {
+      await processSmsReconciliation(job);
+    } else if (job.kind === 'LEAD_FOLLOW_UP_SUGGESTIONS') {
       await processLeadFollowUpJob(job);
-      await finishBackgroundJob(job, { status: 'SUCCEEDED' });
+    } else {
+      throw new HttpError(400, 'This background job kind is not supported by this worker.');
     }
+    if (await finishBackgroundJob(job, { status: 'SUCCEEDED', providerId }))
+      console.info(
+        JSON.stringify({
+          event: 'background_job_completed',
+          jobId: job.id,
+          companyId: job.companyId,
+          kind: job.kind,
+          attempt: job.attempts,
+        }),
+      );
   } catch (error) {
     if (error instanceof JobLeaseLostError) {
       console.warn(
@@ -82,20 +137,25 @@ export async function runJob(job: BackgroundJob): Promise<void> {
       error instanceof ProviderFailure || error instanceof HttpError
         ? error.message
         : providerStatus
-          ? `AI provider returned HTTP ${providerStatus}. Check provider configuration or retry availability.`
-          : 'Background processing failed. Check the worker and provider configuration.';
+          ? `Provider returned HTTP ${providerStatus}. Check configuration or retry availability.`
+          : error instanceof ZodError
+            ? 'The background job payload or provider output is invalid.'
+            : 'Background processing failed. Check the worker and provider configuration.';
     const blocked =
       error instanceof ProviderFailure
         ? error.blocked
-        : (error instanceof HttpError && error.status === 503) ||
+        : error instanceof ProviderUsageLimitError ||
+          (error instanceof HttpError && error.status === 503) ||
           providerStatus === 401 ||
           providerStatus === 403;
     const retryable =
       error instanceof ProviderFailure
         ? error.retryable
-        : providerStatus
-          ? providerStatus === 429 || providerStatus >= 500
-          : true;
+        : error instanceof ZodError
+          ? false
+          : providerStatus
+            ? providerStatus === 408 || providerStatus === 429 || providerStatus >= 500
+            : true;
     const expired =
       (job.kind === 'AUTH_EMAIL' || job.kind === 'OWNER_EMAIL' || job.kind === 'DOCUMENT_EMAIL') &&
       job.firstAttemptAt &&
@@ -111,43 +171,73 @@ export async function runJob(job: BackgroundJob): Promise<void> {
         jobId: job.id,
         companyId: job.companyId,
         kind: job.kind,
+        attempt: job.attempts,
         status,
         error: message,
       }),
     );
-    if (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY')
-      await recordCommunicationFailure(job, message, status !== 'PENDING');
+    if (communication) await recordCommunicationFailure(job, message, status !== 'PENDING');
     await finishBackgroundJob(job, { status, error: message });
+  } finally {
+    await stopHeartbeat();
   }
 }
 
-export async function startWorker(): Promise<void> {
+export async function startWorker(signal?: AbortSignal): Promise<void> {
   const id = randomUUID();
-  let stopping = false;
-  process.once('SIGINT', () => {
-    stopping = true;
-  });
-  process.once('SIGTERM', () => {
-    stopping = true;
-  });
-  await prisma.workerHeartbeat.create({ data: { id } });
-  console.log(JSON.stringify({ event: 'worker_started', workerId: id }));
+  const stop = new AbortController();
+  const active = new Set<Promise<void>>();
+  const shutdown = () => {
+    stop.abort();
+    console.info(
+      JSON.stringify({ event: 'worker_draining', workerId: id, activeJobs: active.size }),
+    );
+  };
+  if (signal?.aborted) return;
+  signal?.addEventListener('abort', shutdown, { once: true });
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
   let nextScan = 0;
+  let heartbeatCreated = false;
   try {
-    while (!stopping) {
+    await prisma.workerHeartbeat.create({ data: { id, lastSeenAt: new Date(0) } });
+    heartbeatCreated = true;
+    console.log(
+      JSON.stringify({
+        event: 'worker_started',
+        workerId: id,
+        concurrency: env.WORKER_CONCURRENCY,
+      }),
+    );
+    while (!stop.signal.aborted) {
       try {
-        await prisma.workerHeartbeat.update({ where: { id }, data: { lastSeenAt: new Date() } });
-        await prisma.$executeRaw`UPDATE "BackgroundJob" SET "status" = 'FAILED', "leaseUntil" = NULL, "leaseToken" = NULL,
-        "lastError" = 'Worker lease expired after the attempt limit. Verify provider delivery.', "updatedAt" = (NOW() AT TIME ZONE 'UTC')
-        WHERE "status" = 'RUNNING' AND "leaseUntil" < (NOW() AT TIME ZONE 'UTC') AND "attempts" >= "maxAttempts"`;
         if (Date.now() >= nextScan) {
+          await reapExpiredBackgroundJobs();
           await scheduleOwnerReminders();
           nextScan = Date.now() + 15000;
         }
-        const job = await claimBackgroundJob();
-        if (job) await runJob(job);
-        else await wait(env.WORKER_POLL_INTERVAL_MS);
+        while (!stop.signal.aborted && active.size < env.WORKER_CONCURRENCY) {
+          const job = await claimBackgroundJob();
+          if (!job) break;
+          const running = runJob(job)
+            .catch((error: unknown) => {
+              console.error(
+                JSON.stringify({
+                  event: 'job_runner_failed',
+                  jobId: job.id,
+                  errorType: error instanceof Error ? error.name : 'Unknown',
+                }),
+              );
+            })
+            .finally(() => {
+              active.delete(running);
+            });
+          active.add(running);
+        }
+        await prisma.workerHeartbeat.update({ where: { id }, data: { lastSeenAt: new Date() } });
+        await wait(Math.min(env.WORKER_POLL_INTERVAL_MS, 5000), undefined, { signal: stop.signal });
       } catch (error) {
+        if (stop.signal.aborted && error instanceof Error && error.name === 'AbortError') break;
         console.error(
           JSON.stringify({
             event: 'worker_iteration_failed',
@@ -155,12 +245,20 @@ export async function startWorker(): Promise<void> {
             errorType: error instanceof Error ? error.name : 'Unknown',
           }),
         );
-        await wait(5000);
+        if (!stop.signal.aborted) await wait(1000);
       }
     }
   } finally {
-    await prisma.workerHeartbeat.deleteMany({ where: { id } });
-    await prisma.$disconnect();
+    await Promise.all(active);
+    process.removeListener('SIGINT', shutdown);
+    process.removeListener('SIGTERM', shutdown);
+    signal?.removeEventListener('abort', shutdown);
+    try {
+      if (heartbeatCreated) await prisma.workerHeartbeat.deleteMany({ where: { id } });
+    } finally {
+      await prisma.$disconnect();
+    }
+    console.info(JSON.stringify({ event: 'worker_stopped', workerId: id }));
   }
 }
 
@@ -169,7 +267,7 @@ if (process.env.VITEST !== 'true') {
     console.error(
       JSON.stringify({
         event: 'worker_stopped_with_error',
-        error: error instanceof Error ? error.message : 'Unknown worker error',
+        errorType: error instanceof Error ? error.name : 'Unknown',
       }),
     );
     process.exitCode = 1;

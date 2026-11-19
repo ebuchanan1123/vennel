@@ -214,6 +214,8 @@ export async function updateOnboarding(
 class OnboardingDryRun extends Error {}
 export async function checkOnboarding(companyId: string): Promise<OnboardingCheck> {
   const profile = await getOnboarding(companyId);
+  const worker = await prisma.workerHeartbeat.findFirst({ orderBy: { lastSeenAt: 'desc' } });
+  const workerHealthy = Boolean(worker && Date.now() - worker.lastSeenAt.getTime() < 120000);
   const checks: OnboardingCheck['checks'] = [
     {
       key: 'contact',
@@ -240,15 +242,16 @@ export async function checkOnboarding(companyId: string): Promise<OnboardingChec
     {
       key: 'phone',
       label: 'Automatic missed-call follow-up',
-      ready: Boolean(
-        profile.twilioPhoneNumber &&
-        profile.forwardToPhoneNumber &&
-        env.TWILIO_ACCOUNT_SID &&
-        env.TWILIO_AUTH_TOKEN,
-      ),
+      ready:
+        Boolean(
+          profile.twilioPhoneNumber &&
+          profile.forwardToPhoneNumber &&
+          env.TWILIO_ACCOUNT_SID &&
+          env.TWILIO_AUTH_TOKEN,
+        ) && workerHealthy,
       required: false,
       detail:
-        'Optional: connect a LeadRecovery number and choose the phone you answer calls on. You can finish setup without this. This check does not place calls, send texts, or test your phone connection.',
+        'Optional: connect a recovery number, choose an answering phone, and keep a durable worker online. This configuration check does not place calls, send texts, or verify live delivery.',
     },
     {
       key: 'email',

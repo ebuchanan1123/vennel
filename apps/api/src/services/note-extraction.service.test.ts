@@ -6,6 +6,7 @@ const provider = vi.hoisted(() => ({
   audio: { transcriptions: { create: vi.fn() } },
 }));
 vi.mock('./openai.service.js', () => ({ openai: provider }));
+vi.mock('./provider-usage.service.js', () => ({ reserveProviderUsage: vi.fn() }));
 import { transcribeCallSummary, validateNoteExtraction } from './note-extraction.service.js';
 
 beforeEach(() => vi.clearAllMocks());
@@ -66,7 +67,7 @@ describe('transient voice transcription', () => {
   it('returns text and clears the source audio buffer', async () => {
     provider.audio.transcriptions.create.mockResolvedValue({ text: 'Reviewed call summary.' });
     const buffer = Buffer.from('synthetic audio');
-    expect(await transcribeCallSummary(buffer, 'audio/webm', 'summary.webm')).toBe(
+    expect(await transcribeCallSummary('business-a', buffer, 'audio/webm', 'summary.webm')).toBe(
       'Reviewed call summary.',
     );
     expect(buffer.every((byte) => byte === 0)).toBe(true);
@@ -75,16 +76,16 @@ describe('transient voice transcription', () => {
   it('reports provider failures, preserves no audio and offers text fallback', async () => {
     provider.audio.transcriptions.create.mockRejectedValue(new Error('Synthetic provider failure'));
     const buffer = Buffer.from('synthetic audio');
-    await expect(transcribeCallSummary(buffer, 'audio/webm', 'summary.webm')).rejects.toMatchObject(
-      { status: 502 },
-    );
+    await expect(
+      transcribeCallSummary('business-a', buffer, 'audio/webm', 'summary.webm'),
+    ).rejects.toMatchObject({ status: 502 });
     expect(buffer.every((byte) => byte === 0)).toBe(true);
   });
 
   it('rejects empty transcriptions without reporting successful capture', async () => {
     provider.audio.transcriptions.create.mockResolvedValue({ text: '   ' });
     await expect(
-      transcribeCallSummary(Buffer.from('audio'), 'audio/webm', 'summary.webm'),
+      transcribeCallSummary('business-a', Buffer.from('audio'), 'audio/webm', 'summary.webm'),
     ).rejects.toMatchObject({ status: 502 });
   });
 });

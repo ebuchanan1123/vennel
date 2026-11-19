@@ -281,6 +281,18 @@ Events are ordered by business and customer phone. Retries reuse persisted inbou
 
 `OPENAI_TIMEOUT_MS` defaults to 20000; `SMS_PROVIDER_TIMEOUT_MS` defaults to 15000. SDK-level automatic retries are disabled; the durable job controls bounded retries. Historical webhook markers are preserved without replaying messages, and historical outbound messages remain explicitly untracked.
 
+The pilot safeguards migration (`20261118233000_pilot_safeguards`) adds shared daily usage counters and an audit trail for owner SMS recovery. `WORKER_CONCURRENCY=4` bounds parallel jobs per process; leases renew while jobs run, and shutdown stops claiming before draining active work. Exhausted crash attempts become visible failed jobs instead of stranded running records. `/health` is liveness; `/health/ready` requires a reachable database and a worker with a recent successful polling heartbeat.
+
+For pilot safety, AI extracts qualification fields, but **customer-facing intake replies use server-owned questions and handoffs**. Industry-specific required fields, merge behavior, emergency escalation and owner review are preserved. Free-form model prose is no longer sent to customers, so it cannot invent a price or confirm a booking. Human-attention flags cannot be cleared by a later model result.
+
+Default shared limits are 120 workspace API requests/account/minute, 200 AI requests/business/UTC day, 20 MiB of transcription uploads/business/UTC day, and 500 SMS submissions/business/UTC day. Limits count attempts/reservations conservatively, not provider invoices or confirmed delivery; they are not a dollar-spend guarantee. Configure `API_RATE_LIMIT_PER_MINUTE`, `AI_DAILY_REQUEST_LIMIT`, `AI_DAILY_AUDIO_BYTE_LIMIT` and `SMS_DAILY_SEND_LIMIT` deliberately, alongside provider billing alerts. Webhooks are still persisted when quotas are exhausted; SMS jobs visibly block, and AI qualification falls back to human review.
+
+Owners can review SMS delivery on a lead conversation. A known or manually verified MessageSid can be reconciled against Twilio without resending. If there is no receipt, stop/verify the original worker and inspect provider logs first. Only an explicit owner attestation that the message was **not accepted** authorizes another attempt, and that action is audited. An incorrect attestation can still cause a duplicate; an ambiguous external send cannot be made exactly-once by a database alone.
+
+Security maintenance updates Next.js within major 15, React within 19.0, Better Auth within 1.7, and the HTTP dependency tree. Zod 4 replaces the affected Zod 3 release; OpenAI SDK 6 supplies supported Zod 4 peer compatibility without changing the structured-response API contract. Vitest 4 and its supported Vite 6 peer replace affected test tooling; test discovery explicitly includes source tests only, not stale compiled tests. Node 24.16.0 was used for validation. The explicit `next>postcss` override keeps Next's pinned CSS dependency on a patched PostCSS 8 release.
+
+The production dependency audit still reports one high-severity `deepmerge-ts` advisory through Prisma 6's configuration tooling. It requires cyclic JavaScript object graphs, which ordinary JSON webhook bodies cannot represent; this project does not pass user-created recursive graphs to Prisma configuration. This is a tracked upstream/tooling risk, **not** a clean dependency audit. Obtain an upstream fix or an approved risk decision before public rollout rather than forcing an unsupported transitive major solely to hide the warning.
+
 For local development you can expose the Express API with either ngrok or Cloudflare Tunnel.
 
 ngrok example:
@@ -308,6 +320,7 @@ Use the HTTPS URL from the tunnel provider in the Twilio webhook configuration.
 ## API Endpoints
 
 - `GET /health`
+- `GET /health/ready`
 - `/api/auth/*` (Better Auth registration, verification, sessions, login/logout and recovery)
 - `GET /api/account`
 - `POST /api/accounts/businesses`
@@ -361,6 +374,7 @@ Use the HTTPS URL from the tunnel provider in the Twilio webhook configuration.
 - `GET/PATCH /api/workspace/:companyId/settings`
 - `GET /api/workspace/:companyId/jobs`
 - `POST /api/workspace/:companyId/jobs/:id/retry`
+- `POST /api/workspace/:companyId/sms-deliveries/:id/reconcile` (owner-only provider lookup or explicit verified-unsent retry)
 - `GET/POST /api/notifications/unsubscribe/:token` (scoped capability link, no workspace data access)
 - `POST /webhooks/twilio/voice`
 - `POST /webhooks/twilio/voice/status`

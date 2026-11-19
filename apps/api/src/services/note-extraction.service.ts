@@ -8,6 +8,7 @@ import { noteExtractionSchema, suggestedFollowUpSchema } from '../schemas/call-n
 import { getQualificationConfig } from './qualification-config.service.js';
 import { openai } from './openai.service.js';
 import type { Company } from '@prisma/client';
+import { reserveProviderUsage } from './provider-usage.service.js';
 
 const nullString = { type: ['string', 'null'] };
 const factJson = (value: object) => ({
@@ -185,10 +186,13 @@ export async function extractCallNote(params: {
       503,
       'Configure OPENAI_API_KEY to analyze notes, or review this note manually.',
     );
+  await reserveProviderUsage(params.company.id, 'AI_REQUEST');
   const response = await openai.responses
     .create(
       {
         model: env.OPENAI_MODEL,
+        store: false,
+        max_output_tokens: 3000,
         input: [
           { role: 'system', content: extractionInstructions.join('\n') },
           {
@@ -231,6 +235,7 @@ export async function extractCallNote(params: {
 }
 
 export async function transcribeCallSummary(
+  companyId: string,
   buffer: Buffer,
   mimeType: string,
   filename: string,
@@ -238,6 +243,8 @@ export async function transcribeCallSummary(
   try {
     if (!openai)
       throw new HttpError(503, 'Configure OPENAI_API_KEY for dictation, or enter a text note.');
+    await reserveProviderUsage(companyId, 'AI_AUDIO_BYTES', buffer.length);
+    await reserveProviderUsage(companyId, 'AI_REQUEST');
     const file = await toFile(buffer, filename, { type: mimeType });
     const response = await openai.audio.transcriptions.create(
       { file, model: env.OPENAI_TRANSCRIPTION_MODEL },
@@ -270,6 +277,7 @@ export function blankNoteExtraction(): CallNoteExtraction {
 }
 
 export async function suggestLeadFollowUps(params: {
+  companyId: string;
   text: string;
   timeZone: string;
   occurredAt: string;
@@ -279,9 +287,14 @@ export async function suggestLeadFollowUps(params: {
       503,
       'AI follow-up suggestions require OPENAI_API_KEY. Create tasks manually while it is unavailable.',
     );
+  await reserveProviderUsage(params.companyId, 'AI_REQUEST');
+  const { companyId: _companyId, ...source } = params;
+  void _companyId;
   const response = await openai.responses.create(
     {
       model: env.OPENAI_MODEL,
+      store: false,
+      max_output_tokens: 2000,
       input: [
         {
           role: 'system',
@@ -290,7 +303,7 @@ export async function suggestLeadFollowUps(params: {
             'Return only useful follow-up suggestions grounded in the supplied messages.',
           ].join('\n'),
         },
-        { role: 'user', content: JSON.stringify(params) },
+        { role: 'user', content: JSON.stringify(source) },
       ],
       text: {
         format: {

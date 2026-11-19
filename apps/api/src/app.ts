@@ -22,9 +22,11 @@ import { workspaceRouter } from './routes/workspace.js';
 import { publicNotificationsRouter } from './routes/notifications.js';
 import { resendWebhookRouter } from './routes/document-delivery.js';
 import { accountsRouter } from './routes/accounts.js';
+import { apiRateLimit } from './middleware/api-rate-limit.js';
 
 export function createApiApp(authProvider: typeof getAccountAuth = getAccountAuth) {
   const app = express();
+  app.disable('x-powered-by');
   app.use(cors({ origin: new URL(env.DASHBOARD_BASE_URL).origin, credentials: true }));
   app.all(
     '/api/auth/*',
@@ -39,14 +41,14 @@ export function createApiApp(authProvider: typeof getAccountAuth = getAccountAut
     express.raw({ type: 'application/json', limit: '256kb' }),
     resendWebhookRouter,
   );
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.json({ limit: '100kb' }));
+  app.use(express.urlencoded({ extended: false, limit: '32kb', parameterLimit: 100 }));
   app.get('/', (_req, res) =>
     res.json({ service: 'lead-recovery-api', docs: 'Use /health and /api endpoints' }),
   );
   app.use('/health', healthRouter);
   app.use('/api/notifications', publicNotificationsRouter);
-  app.use('/api', requireSameOrigin, accountSessionMiddleware(authProvider));
+  app.use('/api', requireSameOrigin, accountSessionMiddleware(authProvider), apiRateLimit);
   app.get('/api/account', (req, res) => res.json(currentAccount(req)));
   app.use('/api/accounts', accountsRouter);
   app.use('/api/companies', companiesRouter);

@@ -27,6 +27,7 @@ const provider: SmsProvider = {
   fetch: vi.fn(),
 };
 const ai = vi.fn<typeof runQualificationModel>();
+const providerOrigins = new Set<string>();
 const modelResult: QualificationResult = {
   reply: 'What city are you in?',
   serviceType: null,
@@ -49,6 +50,13 @@ let claim: typeof import('./background-job.service.js').claimBackgroundJob;
 let finish: typeof import('./background-job.service.js').finishBackgroundJob;
 let retry: typeof import('./background-job.service.js').retryBackgroundJob;
 let run: typeof import('../worker.js').runJob;
+let start: typeof import('../worker.js').startWorker;
+let renew: typeof import('./background-job.service.js').renewBackgroundJobLease;
+let reap: typeof import('./background-job.service.js').reapExpiredBackgroundJobs;
+let reserve: typeof import('./provider-usage.service.js').reserveProviderUsage;
+let consumeLimit: typeof import('../middleware/api-rate-limit.js').consumeApiRateLimit;
+let reconcile: typeof import('./sms-delivery.service.js').reconcileSmsDelivery;
+let config: typeof env;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -153,11 +161,18 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
       smsProvider: provider,
     }));
     vi.doMock('./openai.service.js', () => ({ openai: null, runQualificationModel: ai }));
+    config = (await import('../env.js')).env;
     const jobs = await import('./background-job.service.js');
     claim = jobs.claimBackgroundJob;
     finish = jobs.finishBackgroundJob;
     retry = jobs.retryBackgroundJob;
+    renew = jobs.renewBackgroundJobLease;
+    reap = jobs.reapExpiredBackgroundJobs;
     run = (await import('../worker.js')).runJob;
+    start = (await import('../worker.js')).startWorker;
+    reserve = (await import('./provider-usage.service.js')).reserveProviderUsage;
+    consumeLimit = (await import('../middleware/api-rate-limit.js')).consumeApiRateLimit;
+    reconcile = (await import('./sms-delivery.service.js')).reconcileSmsDelivery;
     const { createApiApp } = await import('../app.js');
     for (let index = 0; index < 2; index += 1) {
       const server = createServer(createApiApp());
@@ -167,23 +182,54 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
       servers.push(server);
       bases.push(`http://127.0.0.1:${address.port}`);
     }
+    const localFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (!bases.includes(url.origin) && !providerOrigins.has(url.origin))
+        throw new Error('External provider calls are disabled in communication tests.');
+      return localFetch(input, init);
+    });
   }, 60000);
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    config.AI_DAILY_REQUEST_LIMIT = 200;
+    config.SMS_DAILY_SEND_LIMIT = 500;
+    config.API_RATE_LIMIT_PER_MINUTE = 120;
+    config.WORKER_CONCURRENCY = 4;
     vi.mocked(provider.configured).mockReturnValue(true);
-    vi.mocked(provider.send).mockImplementation(async (input) => ({
-      id: sid(),
-      status: 'queued',
-      from: input.from,
-      to: input.to,
-      body: input.body,
-      errorCode: null,
-    }));
-    ai.mockResolvedValue(modelResult);
+    vi.mocked(provider.send)
+      .mockReset()
+      .mockImplementation(async (input) => ({
+        id: sid(),
+        status: 'queued',
+        from: input.from,
+        to: input.to,
+        body: input.body,
+        errorCode: null,
+      }));
+    vi.mocked(provider.fetch)
+      .mockReset()
+      .mockImplementation(async (id) => {
+        const current = await database.smsDelivery.findUniqueOrThrow({
+          where: { providerId: id },
+          include: { message: true },
+        });
+        return {
+          id,
+          status: 'delivered',
+          from: current.fromPhone,
+          to: current.toPhone,
+          body: current.message.body,
+          errorCode: null,
+        };
+      });
+    ai.mockReset().mockResolvedValue(modelResult);
     await database.webhookEvent.deleteMany();
     await database.backgroundJob.deleteMany();
     await database.company.deleteMany();
+    await database.rateLimit.deleteMany();
+    await database.workerHeartbeat.deleteMany();
     companyId = (
       await database.company.create({
         data: {
@@ -213,10 +259,13 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
     if (/^communications_test_[a-f0-9]{32}$/.test(schema))
       await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.$disconnect();
+    vi.unstubAllGlobals();
   });
 
   it('acknowledges only after persisting the event and job, without waiting for AI or sending SMS', async () => {
+    const started = performance.now();
     const response = await post('/webhooks/twilio/sms', sms());
+    expect(performance.now() - started).toBeLessThan(2000);
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/xml');
     expect(await response.text()).not.toContain('<Message>');
@@ -247,7 +296,7 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
     expect(provider.send).toHaveBeenCalledTimes(1);
     await post('/webhooks/twilio/sms', body, 1);
     expect(await database.message.count()).toBe(2);
-    expect(await database.backgroundJob.count()).toBe(1);
+    expect(await database.backgroundJob.count({ where: { kind: 'INBOUND_SMS' } })).toBe(1);
   });
 
   it('recovers a crash after persistence and claiming but before processing', async () => {
@@ -611,4 +660,418 @@ describe.runIf(enabled).sequential('durable communications on isolated PostgreSQ
     expect((await status(current.id, sid(), 'delivered')).status).toBe(409);
     expect(await delivery()).toMatchObject({ status: 'ACCEPTED' });
   });
+
+  it('rolls back the event and conversation when durable enqueue fails, and accepts a subsequent webhook retry', async () => {
+    await database.$executeRawUnsafe(
+      'ALTER TABLE "BackgroundJob" ADD CONSTRAINT "test_reject_sms" CHECK ("kind" <> \'INBOUND_SMS\')',
+    );
+    const log = vi.spyOn(console, 'error');
+    const privateText = `Private customer content ${randomUUID()}`;
+    const body = sms({ Body: privateText });
+    try {
+      expect((await post('/webhooks/twilio/sms', body)).status).toBe(500);
+      expect(await database.webhookEvent.count()).toBe(0);
+      expect(await database.conversation.count()).toBe(0);
+      const logs = JSON.stringify(log.mock.calls);
+      expect(logs).not.toContain(privateText);
+      expect(logs).not.toContain(signatureToken);
+    } finally {
+      await database.$executeRawUnsafe(
+        'ALTER TABLE "BackgroundJob" DROP CONSTRAINT "test_reject_sms"',
+      );
+      log.mockRestore();
+    }
+    expect((await post('/webhooks/twilio/sms', body)).status).toBe(200);
+    expect(await database.webhookEvent.count()).toBe(1);
+  });
+
+  it('preserves historical deduplication markers without replaying old outbound messages', async () => {
+    const body = sms();
+    await database.webhookEvent.create({
+      data: { eventType: 'SMS_MESSAGE', externalId: body.MessageSid, status: 'COMPLETED' },
+    });
+    expect((await post('/webhooks/twilio/sms', body)).status).toBe(200);
+    expect(await database.backgroundJob.count()).toBe(0);
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('continues forwarding calls with unavailable caller ID without attempting an invalid recovery SMS', async () => {
+    const body = call({ From: 'anonymous' });
+    expect((await post('/webhooks/twilio/voice', body)).status).toBe(200);
+    expect(
+      (await post('/webhooks/twilio/voice/status?companySlug=isolated-hvac', body)).status,
+    ).toBe(200);
+    expect(await runNext()).toMatchObject({ status: 'SUCCEEDED' });
+    expect(await database.webhookEvent.findFirst()).toMatchObject({
+      status: 'COMPLETED',
+      lastError: expect.stringContaining('caller ID'),
+    });
+    expect(provider.send).not.toHaveBeenCalled();
+  });
+
+  it('never sends model-generated prices, bookings or commitments to customers', async () => {
+    const unsafe = 'The price is $125 and your appointment is confirmed for tomorrow.';
+    ai.mockResolvedValue({ ...modelResult, reply: unsafe });
+    await post('/webhooks/twilio/sms', sms({ Body: 'What does it cost and can I book tomorrow?' }));
+    await runNext();
+    const outgoing = await delivery();
+    expect(outgoing.message.body).not.toContain(unsafe);
+    expect(outgoing.message.body).not.toContain('$125');
+    expect(outgoing.message.body).not.toContain('appointment is confirmed');
+    expect(outgoing.message.body).toContain('must confirm pricing and availability');
+    expect(outgoing.message.body).toContain('What kind of heating or cooling service');
+  });
+
+  it('does not allow a later AI result to clear human-attention flags', async () => {
+    await post('/webhooks/twilio/sms', sms({ Body: 'I smell gas.' }));
+    await runNext();
+    await post('/webhooks/twilio/sms', sms({ Body: 'What should I do next?' }));
+    await runNext();
+    expect(await database.lead.findFirst()).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      needsHuman: true,
+    });
+    expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries rather than overwriting a human-attention update made during qualification', async () => {
+    await post('/webhooks/twilio/sms', sms());
+    const entered = deferred<void>();
+    const release = deferred<QualificationResult>();
+    ai.mockImplementationOnce(async () => {
+      entered.resolve();
+      return release.promise;
+    });
+    const job = await nextJob();
+    const running = run(job);
+    await entered.promise;
+    const lead = await database.lead.findFirstOrThrow();
+    await database.lead.update({
+      where: { id: lead.id },
+      data: { needsHuman: true, status: 'NEEDS_HUMAN' },
+    });
+    release.resolve(modelResult);
+    await running;
+    expect(await database.backgroundJob.findUnique({ where: { id: job.id } })).toMatchObject({
+      status: 'PENDING',
+    });
+    expect(provider.send).not.toHaveBeenCalled();
+    await makeDue(job.id);
+    await runNext();
+    expect(await database.lead.findFirst()).toMatchObject({
+      needsHuman: true,
+      status: 'NEEDS_HUMAN',
+    });
+  });
+
+  it('reconciles an accepted SMS through a durable provider lookup when callbacks are missing', async () => {
+    await post('/webhooks/twilio/sms', sms());
+    await runNext();
+    const check = await database.backgroundJob.findFirstOrThrow({
+      where: { kind: 'SMS_STATUS_RECONCILIATION' },
+    });
+    expect(check.dueAt.getTime()).toBeGreaterThan(Date.now() + 55000);
+    await makeDue(check.id);
+    const claimed = await claim();
+    if (!claimed) throw new Error('Expected the status reconciliation job.');
+    expect(claimed.id).toBe(check.id);
+    await run(claimed);
+    expect(await delivery()).toMatchObject({ status: 'DELIVERED' });
+    expect(provider.fetch).toHaveBeenCalledTimes(1);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('records an owner-verified provider receipt for an unknown send without submitting another SMS', async () => {
+    vi.mocked(provider.send).mockRejectedValueOnce({ code: 'ETIMEDOUT' });
+    await post('/webhooks/twilio/sms', sms());
+    const job = await runNext();
+    const unknown = await delivery();
+    const id = sid();
+    vi.mocked(provider.fetch).mockResolvedValueOnce({
+      id,
+      status: 'sent',
+      from: phone,
+      to: customer,
+      body: unknown.message.body,
+      errorCode: null,
+    });
+    await reconcile(companyId, unknown.id, 'verified-owner', { action: 'LOOKUP', providerId: id });
+    expect(await delivery()).toMatchObject({ status: 'SENT', providerId: id });
+    expect(await database.backgroundJob.findUnique({ where: { id: job.id } })).toMatchObject({
+      status: 'SUCCEEDED',
+    });
+    expect(await database.smsDeliveryReview.findFirst()).toMatchObject({
+      actorId: 'verified-owner',
+      action: 'LOOKUP',
+      providerId: id,
+    });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires explicit owner verification before retrying an unknown send, preserving the existing message', async () => {
+    vi.mocked(provider.send).mockRejectedValueOnce({ code: 'ETIMEDOUT' });
+    await post('/webhooks/twilio/sms', sms());
+    await runNext();
+    const unknown = await delivery();
+    await reconcile(companyId, unknown.id, 'verified-owner', {
+      action: 'CONFIRM_NOT_SENT',
+      approved: true,
+    });
+    await runNext();
+    expect(await delivery()).toMatchObject({ id: unknown.id, status: 'ACCEPTED' });
+    expect(await database.smsDeliveryReview.findFirst()).toMatchObject({
+      actorId: 'verified-owner',
+      action: 'CONFIRM_NOT_SENT',
+    });
+    expect(await database.message.count()).toBe(2);
+    expect(ai).toHaveBeenCalledTimes(1);
+    expect(provider.send).toHaveBeenCalledTimes(2);
+    await expect(
+      reconcile(companyId, unknown.id, 'verified-owner', {
+        action: 'CONFIRM_NOT_SENT',
+        approved: true,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('enforces business-scoped daily AI reservations atomically under concurrent requests', async () => {
+    config.AI_DAILY_REQUEST_LIMIT = 2;
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: 10 }, () => reserve(companyId, 'AI_REQUEST')),
+    );
+    expect(outcomes.filter((result) => result.status === 'fulfilled')).toHaveLength(2);
+    const usage = await database.providerUsage.findFirstOrThrow();
+    expect(usage.used).toBe(2);
+    expect(usage.windowStart.getUTCHours()).toBe(0);
+    const other = await database.company.create({
+      data: { name: 'Other quota', slug: 'other-quota', niche: 'HVAC', serviceAreas: [] },
+    });
+    await reserve(other.id, 'AI_REQUEST');
+    expect(
+      await database.providerUsage.findFirst({ where: { companyId: other.id } }),
+    ).toMatchObject({ used: 1 });
+  });
+
+  it('blocks excess SMS submissions before the provider call and makes the pause visible', async () => {
+    config.SMS_DAILY_SEND_LIMIT = 1;
+    await post('/webhooks/twilio/sms', sms());
+    await runNext();
+    await post('/webhooks/twilio/sms', sms());
+    expect(await runNext()).toMatchObject({
+      status: 'BLOCKED',
+      lastError: expect.stringContaining('daily SMS'),
+    });
+    expect(await database.smsDelivery.count({ where: { status: 'PENDING' } })).toBe(1);
+    expect(await database.lead.findFirst()).toMatchObject({ needsHuman: true });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a shared database API rate limit rather than per-instance memory', async () => {
+    config.API_RATE_LIMIT_PER_MINUTE = 2;
+    const decisions = await Promise.all(
+      Array.from({ length: 10 }, () => consumeLimit('same-account')),
+    );
+    expect(decisions.filter(Boolean)).toHaveLength(2);
+    expect(await database.rateLimit.findFirst()).toMatchObject({ count: 3 });
+    await database.rateLimit.updateMany({ data: { lastRequest: BigInt(Date.now() - 120000) } });
+    expect(await consumeLimit('same-account')).toBe(true);
+    expect(await database.rateLimit.findFirst()).toMatchObject({ count: 1 });
+  });
+
+  it('renews only a current, unexpired lease and recovers exhausted crash attempts with human visibility', async () => {
+    await post('/webhooks/twilio/sms', sms());
+    const entered = deferred<void>();
+    const release = deferred<QualificationResult>();
+    ai.mockImplementationOnce(async () => {
+      entered.resolve();
+      return release.promise;
+    });
+    const job = await nextJob();
+    const running = run(job);
+    await entered.promise;
+    expect(await renew(job)).toBe(true);
+    await database.backgroundJob.update({
+      where: { id: job.id },
+      data: { leaseUntil: new Date(0), maxAttempts: 1 },
+    });
+    expect(await renew(job)).toBe(false);
+    await reap();
+    expect(await database.backgroundJob.findUnique({ where: { id: job.id } })).toMatchObject({
+      status: 'FAILED',
+    });
+    expect(await database.webhookEvent.findFirst()).toMatchObject({ status: 'FAILED' });
+    expect(await database.lead.findFirst()).toMatchObject({ needsHuman: true });
+    expect(await database.jobAttempt.findFirst()).toMatchObject({
+      outcome: 'LEASE_EXPIRED',
+      finishedAt: expect.any(Date),
+    });
+    release.resolve(modelResult);
+    await running;
+    await retry(companyId, job.id);
+    await runNext();
+    expect(await database.webhookEvent.findFirst()).toMatchObject({ status: 'COMPLETED' });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers provider acceptance when a worker crashes before finishing its final attempt', async () => {
+    await post('/webhooks/twilio/sms', sms());
+    const job = await nextJob();
+    await (await import('./communication.service.js')).processCommunicationJob(job);
+    await database.backgroundJob.update({
+      where: { id: job.id },
+      data: { leaseUntil: new Date(0), maxAttempts: 1 },
+    });
+    await reap();
+    expect(await database.backgroundJob.findUnique({ where: { id: job.id } })).toMatchObject({
+      status: 'SUCCEEDED',
+      providerId: expect.any(String),
+    });
+    expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('renews an active job lease while AI is running', async () => {
+    await post('/webhooks/twilio/sms', sms());
+    const entered = deferred<void>();
+    const release = deferred<QualificationResult>();
+    ai.mockImplementationOnce(async () => {
+      entered.resolve();
+      return release.promise;
+    });
+    const job = await nextJob();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const running = run(job);
+    try {
+      await entered.promise;
+      await database.backgroundJob.update({
+        where: { id: job.id },
+        data: { leaseUntil: new Date(Date.now() + 5000) },
+      });
+      await vi.advanceTimersByTimeAsync(40000);
+      await vi.waitFor(async () => {
+        const renewed = await database.backgroundJob.findUniqueOrThrow({ where: { id: job.id } });
+        expect(renewed.leaseUntil?.getTime()).toBeGreaterThan(Date.now() + 110000);
+      });
+    } finally {
+      release.resolve(modelResult);
+      await running;
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports database/worker readiness and drains active work on shutdown without claiming new events', async () => {
+    expect((await fetch(`${bases[0]}/health`)).status).toBe(200);
+    expect((await fetch(`${bases[0]}/health/ready`)).status).toBe(503);
+    config.WORKER_CONCURRENCY = 2;
+    await post('/webhooks/twilio/sms', sms());
+    await post('/webhooks/twilio/sms', sms({ From: '+15555550109' }));
+    const entered = deferred<void>();
+    const release = deferred<QualificationResult>();
+    let active = 0;
+    ai.mockImplementation(async () => {
+      active += 1;
+      if (active === 2) entered.resolve();
+      return release.promise;
+    });
+    const stop = new AbortController();
+    const worker = start(stop.signal);
+    try {
+      await vi.waitFor(() => expect(active).toBe(2), { timeout: 2000 });
+      expect((await fetch(`${bases[0]}/health/ready`)).status).toBe(200);
+      stop.abort();
+      await post('/webhooks/twilio/sms', sms({ From: '+15555550110' }));
+    } finally {
+      stop.abort();
+      release.resolve(modelResult);
+      await worker;
+    }
+    expect(await database.workerHeartbeat.count()).toBe(0);
+    expect(
+      await database.backgroundJob.count({ where: { kind: 'INBOUND_SMS', status: 'PENDING' } }),
+    ).toBe(1);
+    expect(provider.send).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['success', 'timeout'] as const)(
+    'validates the actual AI SDK transport against a local provider (%s)',
+    async (mode) => {
+      const { APIConnectionTimeoutError } = await import('openai');
+      const actual =
+        await vi.importActual<typeof import('./openai.service.js')>('./openai.service.js');
+      const client = actual.openai;
+      if (!client) throw new Error('Expected the synthetic test AI client.');
+      const requests: unknown[] = [];
+      const server = createServer(async (request, response) => {
+        let body = '';
+        for await (const chunk of request) body += chunk;
+        requests.push(JSON.parse(body));
+        if (mode === 'timeout') return;
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            id: 'resp_synthetic',
+            object: 'response',
+            status: 'completed',
+            model: 'synthetic-model',
+            output: [
+              {
+                id: 'msg_synthetic',
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [
+                  { type: 'output_text', text: JSON.stringify(modelResult), annotations: [] },
+                ],
+              },
+            ],
+          }),
+        );
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Expected the local provider port.');
+      const base = `http://127.0.0.1:${address.port}`;
+      const originalBase = client.baseURL;
+      const originalTimeout = client.timeout;
+      client.baseURL = base;
+      client.timeout = 1000;
+      providerOrigins.add(base);
+      try {
+        const company = await database.company.findUniqueOrThrow({ where: { id: companyId } });
+        const lead = await database.lead.create({
+          data: { companyId, phone: customer, source: 'SMS' },
+        });
+        const started = performance.now();
+        const result = actual.runQualificationModel({
+          company,
+          lead,
+          recentMessages: [],
+          latestCustomerMessage: 'Synthetic furnace inquiry',
+          missingFields: ['serviceType', 'issue'],
+        });
+        if (mode === 'success') await expect(result).resolves.toEqual(modelResult);
+        else await expect(result).rejects.toBeInstanceOf(APIConnectionTimeoutError);
+        expect(performance.now() - started).toBeLessThan(4000);
+        expect(requests).toHaveLength(1);
+        expect(requests[0]).toMatchObject({
+          model: config.OPENAI_MODEL,
+          max_output_tokens: 1200,
+          store: false,
+        });
+        expect(client.maxRetries).toBe(0);
+        expect(await database.providerUsage.findFirst()).toMatchObject({
+          kind: 'AI_REQUEST',
+          used: 1,
+        });
+      } finally {
+        client.baseURL = originalBase;
+        client.timeout = originalTimeout;
+        providerOrigins.delete(base);
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    },
+  );
 });

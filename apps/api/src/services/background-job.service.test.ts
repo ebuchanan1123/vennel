@@ -5,7 +5,7 @@ import { prisma } from '@lead-recovery/database';
 const mocks = vi.hoisted(() => ({
   db: {
     backgroundJob: { upsert: vi.fn(), updateMany: vi.fn(), findFirst: vi.fn() },
-    jobAttempt: { updateMany: vi.fn() },
+    jobAttempt: { updateMany: vi.fn(), upsert: vi.fn() },
     $queryRaw: vi.fn(),
     $transaction: vi.fn(),
   },
@@ -44,6 +44,7 @@ const job: BackgroundJob = {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.db.$transaction.mockImplementation((fn) => fn(mocks.db));
+  mocks.db.$queryRaw.mockResolvedValue([job]);
   mocks.db.backgroundJob.updateMany.mockResolvedValue({ count: 1 });
 });
 describe('durable job leasing and idempotency', () => {
@@ -72,7 +73,11 @@ describe('durable job leasing and idempotency', () => {
     await finishBackgroundJob(job, { status: 'SUCCEEDED', providerId: 'email-a' });
     expect(mocks.db.backgroundJob.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: job.id, status: 'RUNNING', leaseToken: job.leaseToken },
+        where: expect.objectContaining({
+          id: job.id,
+          status: 'RUNNING',
+          leaseToken: job.leaseToken,
+        }),
       }),
     );
     expect(mocks.db.jobAttempt.updateMany).toHaveBeenCalled();

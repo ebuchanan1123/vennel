@@ -4,6 +4,7 @@ import type { BackgroundJobRecord } from '@lead-recovery/types';
 import { Prisma, type BackgroundJob } from '@prisma/client';
 
 import { HttpError } from '../middleware/error-handler.js';
+import { assertJobLease, JobLeaseLostError } from './conversation-lock.service.js';
 
 export const EMAIL_RETRY_WINDOW_MS = 23 * 60 * 60 * 1000;
 export const LEASE_MS = 120000;
@@ -23,18 +24,20 @@ export async function enqueueBackgroundJob(
   kind: BackgroundJob['kind'],
   eventKey: string,
   payload: Prisma.InputJsonValue,
+  options?: { dueAt?: Date; maxAttempts?: number },
 ) {
   return db.backgroundJob.upsert({
     where: { companyId_eventKey: { companyId, eventKey } },
-    create: { companyId, kind, eventKey, payload },
+    create: { companyId, kind, eventKey, payload, ...options },
     update: {},
   });
 }
 
 export async function claimBackgroundJob(): Promise<BackgroundJob | null> {
   const token = randomUUID();
-  // Prisma DateTime columns contain UTC timestamps without a SQL time zone.
-  const jobs = await prisma.$queryRaw<BackgroundJob[]>`
+  return prisma.$transaction(async (tx) => {
+    // Prisma DateTime columns contain UTC timestamps without a SQL time zone.
+    const jobs = await tx.$queryRaw<BackgroundJob[]>`
     UPDATE "BackgroundJob" SET
       "status" = 'RUNNING', "leaseToken" = ${token},
       "leaseUntil" = (NOW() AT TIME ZONE 'UTC') + INTERVAL '120 seconds',
@@ -54,17 +57,102 @@ export async function claimBackgroundJob(): Promise<BackgroundJob | null> {
       FOR UPDATE OF candidate SKIP LOCKED LIMIT 1
     )
     RETURNING *`;
-  const job = jobs[0];
-  if (!job) return null;
-  await prisma.jobAttempt.updateMany({
-    where: { jobId: job.id, attempt: { lt: job.attempts }, finishedAt: null },
-    data: {
-      finishedAt: new Date(),
-      outcome: 'LEASE_EXPIRED',
-      error: 'The previous worker lease expired before completion.',
-    },
+    const job = jobs[0];
+    if (!job) return null;
+    await tx.jobAttempt.updateMany({
+      where: { jobId: job.id, attempt: { lt: job.attempts }, finishedAt: null },
+      data: {
+        finishedAt: new Date(),
+        outcome: 'LEASE_EXPIRED',
+        error: 'The previous worker lease expired before completion.',
+      },
+    });
+    await tx.jobAttempt.upsert({
+      where: { jobId_attempt: { jobId: job.id, attempt: job.attempts } },
+      create: { jobId: job.id, attempt: job.attempts },
+      update: {},
+    });
+    return job;
   });
-  return job;
+}
+
+export async function renewBackgroundJobLease(job: BackgroundJob): Promise<boolean> {
+  const changed = await prisma.$executeRaw`
+    UPDATE "BackgroundJob" SET
+      "leaseUntil" = (NOW() AT TIME ZONE 'UTC') + INTERVAL '120 seconds',
+      "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+    WHERE "id" = ${job.id} AND "status" = 'RUNNING' AND "leaseToken" = ${job.leaseToken}
+      AND "leaseUntil" > (NOW() AT TIME ZONE 'UTC')`;
+  return changed === 1;
+}
+
+export async function reapExpiredBackgroundJobs(): Promise<void> {
+  // Lead writes enqueue jobs themselves; load their side effects after queue modules initialize.
+  const { updateLead } = await import('./lead.service.js');
+  await prisma.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<BackgroundJob[]>`
+      UPDATE "BackgroundJob" SET "status" = 'FAILED', "leaseToken" = NULL, "leaseUntil" = NULL,
+        "lastError" = 'Worker lease expired after the attempt limit. Verify provider delivery before retrying.',
+        "completedAt" = (NOW() AT TIME ZONE 'UTC'), "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+      WHERE "id" IN (
+        SELECT "id" FROM "BackgroundJob"
+        WHERE "status" = 'RUNNING' AND "leaseUntil" < (NOW() AT TIME ZONE 'UTC')
+          AND "attempts" >= "maxAttempts"
+        ORDER BY "leaseUntil" FOR UPDATE SKIP LOCKED LIMIT 100
+      ) RETURNING *`;
+    for (const job of jobs) {
+      let outcome = 'LEASE_EXPIRED';
+      if (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY') {
+        const event = await tx.webhookEvent.findUnique({
+          where: { jobId: job.id },
+          include: {
+            inboundMessage: true,
+            outboundMessage: { include: { smsDelivery: true } },
+          },
+        });
+        if (event?.status === 'COMPLETED') {
+          outcome = 'SUCCEEDED';
+          await tx.backgroundJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'SUCCEEDED',
+              lastError: null,
+              providerId: event.outboundMessage?.smsDelivery?.providerId,
+            },
+          });
+        } else if (event) {
+          await tx.webhookEvent.update({
+            where: { id: event.id },
+            data: { status: 'FAILED', lastError: job.lastError },
+          });
+          const delivery = event.outboundMessage?.smsDelivery;
+          if (delivery?.status === 'SENDING' && !delivery.providerId)
+            await tx.smsDelivery.update({
+              where: { id: delivery.id },
+              data: { status: 'UNKNOWN', lastError: job.lastError },
+            });
+          const leadId = event.inboundMessage?.leadId ?? event.outboundMessage?.leadId;
+          if (leadId) await updateLead(leadId, { status: 'NEEDS_HUMAN', needsHuman: true }, tx);
+        }
+      }
+      await tx.jobAttempt.updateMany({
+        where: { jobId: job.id, finishedAt: null },
+        data: {
+          finishedAt: new Date(),
+          outcome,
+          error: outcome === 'SUCCEEDED' ? null : job.lastError,
+        },
+      });
+      console.warn(
+        JSON.stringify({
+          event: 'background_job_lease_exhausted',
+          jobId: job.id,
+          companyId: job.companyId,
+          outcome,
+        }),
+      );
+    }
+  });
 }
 
 export async function finishBackgroundJob(
@@ -74,23 +162,36 @@ export async function finishBackgroundJob(
     error?: string;
     providerId?: string;
   },
-): Promise<void> {
+): Promise<boolean> {
   const updated = await prisma.$transaction(async (tx) => {
-    const changed = await tx.backgroundJob.updateMany({
-      where: { id: job.id, status: 'RUNNING', leaseToken: job.leaseToken },
-      data: {
-        status: result.status,
-        leaseToken: null,
-        leaseUntil: null,
-        lastError: result.error ?? null,
-        providerId: result.providerId,
-        completedAt:
-          result.status === 'SUCCEEDED' || result.status === 'CANCELLED' ? new Date() : null,
-        ...(result.status === 'PENDING'
-          ? { dueAt: new Date(Date.now() + retryDelayMs(job.attempts)) }
-          : {}),
-      },
-    });
+    let leaseHeld = true;
+    try {
+      await assertJobLease(tx, job);
+    } catch (error) {
+      if (!(error instanceof JobLeaseLostError)) throw error;
+      leaseHeld = false;
+    }
+    const changed = leaseHeld
+      ? await tx.backgroundJob.updateMany({
+          where: {
+            id: job.id,
+            status: 'RUNNING',
+            leaseToken: job.leaseToken,
+          },
+          data: {
+            status: result.status,
+            leaseToken: null,
+            leaseUntil: null,
+            lastError: result.error ?? null,
+            providerId: result.providerId,
+            completedAt:
+              result.status === 'SUCCEEDED' || result.status === 'CANCELLED' ? new Date() : null,
+            ...(result.status === 'PENDING'
+              ? { dueAt: new Date(Date.now() + retryDelayMs(job.attempts)) }
+              : {}),
+          },
+        })
+      : { count: 0 };
     let outcome = result;
     if (changed.count && (job.kind === 'INBOUND_SMS' || job.kind === 'MISSED_CALL_RECOVERY')) {
       const event = await tx.webhookEvent.findUnique({
@@ -114,7 +215,11 @@ export async function finishBackgroundJob(
       }
     }
     await tx.jobAttempt.updateMany({
-      where: { jobId: job.id, attempt: job.attempts },
+      where: {
+        jobId: job.id,
+        attempt: job.attempts,
+        ...(changed.count ? {} : { finishedAt: null }),
+      },
       data: {
         finishedAt: new Date(),
         outcome: changed.count ? outcome.status : 'LEASE_LOST',
@@ -128,6 +233,7 @@ export async function finishBackgroundJob(
     console.warn(
       JSON.stringify({ event: 'job_lease_lost', jobId: job.id, companyId: job.companyId }),
     );
+  return updated.count === 1;
 }
 
 export async function listBackgroundJobs(companyId: string): Promise<BackgroundJobRecord[]> {

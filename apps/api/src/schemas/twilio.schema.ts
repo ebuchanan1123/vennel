@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-const phone = z.string().regex(/^\+[1-9]\d{7,14}$/);
+export const twilioPhoneSchema = z.string().regex(/^\+[1-9]\d{7,14}$/);
+const phone = twilioPhoneSchema;
 const callSid = z.string().regex(/^CA[a-fA-F0-9]{32}$/);
 export const messageSidSchema = z.string().regex(/^(SM|MM)[a-fA-F0-9]{32}$/);
 const accountSid = z
@@ -11,7 +12,7 @@ const accountSid = z
 export const twilioVoiceSchema = z.object({
   CallSid: callSid,
   AccountSid: accountSid,
-  From: phone,
+  From: z.union([phone, z.enum(['anonymous', 'unknown', 'restricted'])]),
   To: phone,
 });
 

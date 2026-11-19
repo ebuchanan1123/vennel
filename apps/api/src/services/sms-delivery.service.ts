@@ -12,6 +12,11 @@ import {
   SmsProviderFailure,
   type SmsProvider,
 } from './twilio.service.js';
+import { reserveProviderUsage } from './provider-usage.service.js';
+import { companyJobId, enqueueBackgroundJob } from './background-job.service.js';
+import { ProviderFailure } from './email-provider.service.js';
+import { messageSidSchema } from '../schemas/twilio.schema.js';
+import { z } from 'zod';
 
 const providerStates = {
   accepted: 'ACCEPTED',
@@ -61,7 +66,9 @@ export async function recordSmsStatus(
   await db.$queryRaw`SELECT "id" FROM "SmsDelivery" WHERE "id" = ${id} FOR UPDATE`;
   const delivery = await db.smsDelivery.findUniqueOrThrow({
     where: { id },
-    include: { message: { include: { outboundEvent: true } } },
+    include: {
+      message: { include: { outboundEvent: true, lead: { select: { companyId: true } } } },
+    },
   });
   if (
     (delivery.providerId && delivery.providerId !== input.providerId) ||
@@ -121,6 +128,24 @@ export async function recordSmsStatus(
   }
   if (status === 'FAILED' && (changed || !delivery.providerId))
     await updateLead(delivery.message.leadId, { needsHuman: true, status: 'NEEDS_HUMAN' }, db);
+  if (status === 'ACCEPTED' || status === 'SENT')
+    await enqueueBackgroundJob(
+      db,
+      delivery.message.lead.companyId,
+      'SMS_STATUS_RECONCILIATION',
+      `sms-status:${delivery.id}`,
+      { deliveryId: delivery.id },
+      { dueAt: new Date(Date.now() + 60000) },
+    );
+  else
+    await db.backgroundJob.updateMany({
+      where: {
+        companyId: delivery.message.lead.companyId,
+        eventKey: `sms-status:${delivery.id}`,
+        status: { in: ['PENDING', 'FAILED', 'BLOCKED'] },
+      },
+      data: { status: 'CANCELLED', completedAt: new Date(), lastError: null },
+    });
   if (changed)
     console.info(
       JSON.stringify({
@@ -138,10 +163,11 @@ export async function sendSmsDelivery(
   deliveryId: string,
   provider: SmsProvider = smsProvider,
 ): Promise<void> {
+  const companyId = companyJobId(job);
   const prepared = await prisma.$transaction(async (tx) => {
     await assertJobLease(tx, job);
     const delivery = await tx.smsDelivery.findFirst({
-      where: { id: deliveryId, message: { lead: { companyId: job.companyId ?? '' } } },
+      where: { id: deliveryId, message: { lead: { companyId } } },
       include: { message: true },
     });
     if (!delivery) throw new HttpError(404, 'SMS delivery not found in this business.');
@@ -159,6 +185,7 @@ export async function sendSmsDelivery(
     }
     if (!provider.configured())
       throw new SmsProviderFailure('Twilio is not configured. No SMS was sent.', false, true);
+    await reserveProviderUsage(companyId, 'SMS_SEND', 1, tx);
     await tx.smsDelivery.update({
       where: { id: delivery.id },
       data: { status: 'SENDING', sendStartedAt: new Date(), lastError: null, errorCode: null },
@@ -188,6 +215,7 @@ export async function sendSmsDelivery(
     );
   }
 
+  await prisma.$transaction((tx) => assertJobLease(tx, job));
   let receipt;
   try {
     receipt = await provider.send({
@@ -207,6 +235,7 @@ export async function sendSmsDelivery(
         data: {
           status: failure.uncertain ? 'UNKNOWN' : 'FAILED',
           lastError: failure.message,
+          errorCode: failure.providerCode ?? null,
         },
       });
       return false;
@@ -228,5 +257,146 @@ export async function sendSmsDelivery(
     from: receipt.from,
     to: receipt.to,
     errorCode: receipt.errorCode,
+  });
+}
+
+export async function processSmsReconciliation(
+  job: BackgroundJob,
+  provider: SmsProvider = smsProvider,
+): Promise<void> {
+  const companyId = companyJobId(job);
+  const { deliveryId } = z.object({ deliveryId: z.string().min(1) }).parse(job.payload);
+  const delivery = await prisma.smsDelivery.findFirst({
+    where: { id: deliveryId, message: { lead: { companyId } } },
+    include: { message: true },
+  });
+  if (!delivery) throw new HttpError(404, 'SMS delivery not found in this business.');
+  if (delivery.status === 'DELIVERED' || delivery.status === 'FAILED') return;
+  if (!delivery.providerId)
+    throw new ProviderFailure(
+      'A provider message ID is required for status reconciliation.',
+      false,
+      true,
+    );
+  const receipt = await provider.fetch(delivery.providerId);
+  if (receipt.body !== delivery.message.body)
+    throw new ProviderFailure('The provider receipt does not match the recorded SMS.', false, true);
+  await recordSmsStatus(delivery.id, {
+    providerId: receipt.id,
+    providerStatus: receipt.status,
+    from: receipt.from,
+    to: receipt.to,
+    errorCode: receipt.errorCode,
+  });
+  if (
+    receipt.status !== 'delivered' &&
+    receipt.status !== 'failed' &&
+    receipt.status !== 'undelivered' &&
+    receipt.status !== 'canceled'
+  )
+    throw new ProviderFailure(
+      'Provider acceptance is recorded, but final SMS delivery is not confirmed.',
+      true,
+    );
+}
+
+export const smsReconciliationSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('LOOKUP'), providerId: messageSidSchema.optional() }).strict(),
+  z.object({ action: z.literal('CONFIRM_NOT_SENT'), approved: z.literal(true) }).strict(),
+]);
+
+export async function reconcileSmsDelivery(
+  companyId: string,
+  id: string,
+  actorId: string,
+  input: z.infer<typeof smsReconciliationSchema>,
+  provider: SmsProvider = smsProvider,
+): Promise<void> {
+  const delivery = await prisma.smsDelivery.findFirst({
+    where: { id, message: { lead: { companyId } } },
+    include: { message: { include: { outboundEvent: true } } },
+  });
+  if (!delivery) throw new HttpError(404, 'SMS delivery not found in this business.');
+  if (input.action === 'LOOKUP') {
+    const providerId = input.providerId ?? delivery.providerId;
+    if (!providerId)
+      throw new HttpError(
+        400,
+        'Enter the matching Twilio MessageSid after checking provider records.',
+      );
+    if (!provider.configured())
+      throw new HttpError(503, 'Twilio is not configured. Provider status cannot be checked.');
+    const receipt = await provider.fetch(providerId).catch((error: unknown) => {
+      if (!(error instanceof SmsProviderFailure)) throw error;
+      console.error(
+        JSON.stringify({
+          event: 'sms_manual_lookup_failed',
+          companyId,
+          deliveryId: id,
+          retryable: error.retryable,
+        }),
+      );
+      throw new HttpError(error.blocked ? 503 : 502, error.message);
+    });
+    if (receipt.body !== delivery.message.body)
+      throw new HttpError(409, 'The provider receipt does not match the recorded SMS content.');
+    await prisma.$transaction(async (tx) => {
+      await recordSmsStatus(
+        id,
+        {
+          providerId: receipt.id,
+          providerStatus: receipt.status,
+          from: receipt.from,
+          to: receipt.to,
+          errorCode: receipt.errorCode,
+        },
+        tx,
+      );
+      await tx.smsDeliveryReview.create({
+        data: { deliveryId: id, actorId, action: input.action, providerId: receipt.id },
+      });
+    });
+    return;
+  }
+  await prisma.$transaction(async (tx) => {
+    const jobId = delivery.message.outboundEvent?.jobId;
+    if (!jobId) throw new HttpError(409, 'This SMS has no recoverable sending job.');
+    await tx.$queryRaw`SELECT "id" FROM "BackgroundJob" WHERE "id" = ${jobId} FOR UPDATE`;
+    const currentJob = await tx.backgroundJob.findUniqueOrThrow({ where: { id: jobId } });
+    const current = await tx.smsDelivery.findUniqueOrThrow({ where: { id } });
+    if (
+      (currentJob.status !== 'BLOCKED' && currentJob.status !== 'FAILED') ||
+      (current.status !== 'UNKNOWN' && current.status !== 'SENDING') ||
+      current.providerId
+    )
+      throw new HttpError(
+        409,
+        'Only a stopped, uncertain send with no provider receipt can be authorized again.',
+      );
+    await tx.smsDelivery.update({
+      where: { id },
+      data: { status: 'PENDING', lastError: null, sendStartedAt: null },
+    });
+    await tx.smsDeliveryReview.create({
+      data: { deliveryId: id, actorId, action: input.action },
+    });
+    await tx.backgroundJob.update({
+      where: { id: jobId },
+      data: {
+        status: 'PENDING',
+        dueAt: new Date(),
+        lastError: null,
+        completedAt: null,
+        maxAttempts: Math.max(currentJob.maxAttempts, currentJob.attempts + 3),
+      },
+    });
+    console.warn(
+      JSON.stringify({
+        event: 'sms_resend_manually_authorized',
+        deliveryId: id,
+        companyId,
+        actorId,
+      }),
+    );
   });
 }

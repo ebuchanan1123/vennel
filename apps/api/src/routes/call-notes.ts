@@ -100,6 +100,7 @@ callNotesRouter.post(
       const context = audioContext.parse(metadata);
       const mimeType = file.mimetype.split(';')[0] ?? '';
       const text = await transcribeCallSummary(
+        companyId,
         file.buffer,
         mimeType,
         `call-summary.${audioTypes.get(mimeType) ?? 'webm'}`,

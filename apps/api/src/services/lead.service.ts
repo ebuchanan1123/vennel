@@ -12,6 +12,7 @@ import {
 import { recordLeadCreated, recordLeadMilestone } from './lead-follow-up.service.js';
 import { callNoteInclude, serializeCallNote } from './call-note.service.js';
 import { followUpInclude, serializeFollowUp } from './follow-up.service.js';
+import { normalizePhone } from './company.service.js';
 
 export type LeadUpdates = {
   source?: LeadSource;
@@ -63,10 +64,6 @@ const SMS_CONTINUABLE_STATUSES: LeadStatus[] = [
 
 /** A lead with no activity for 30 minutes is considered stale for missed-call purposes. */
 export const LEAD_STALE_THRESHOLD_MS = 30 * 60 * 1000;
-
-function normalizePhone(value: string): string {
-  return value.replace(/[^\d+]/g, '');
-}
 
 /**
  * Pure decision function — exported for unit tests.

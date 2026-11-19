@@ -2,6 +2,11 @@
   "name": "lead-recovery",
   "private": true,
   "packageManager": "pnpm@9.12.3",
+  "pnpm": {
+    "overrides": {
+      "next>postcss": "^8.5.33"
+    }
+  },
   "scripts": {
     "accounts:email": "pnpm --filter @lead-recovery/api exec tsx src/scripts/account-admin.ts email",
     "accounts:grant-owner": "pnpm --filter @lead-recovery/api exec tsx src/scripts/account-admin.ts grant-owner",
@@ -24,6 +29,7 @@
     "prettier": "^3.4.2",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
+    "vite": "^6.4.6",
     "typescript-eslint": "^8.18.2"
   }
 }

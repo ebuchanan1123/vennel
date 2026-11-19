@@ -7,6 +7,7 @@ import { HttpError } from '../middleware/error-handler.js';
 import { openai } from './openai.service.js';
 import type { DocumentContext } from '@lead-recovery/types';
 import { serializeServicePricing } from './catalog.service.js';
+import { reserveProviderUsage } from './provider-usage.service.js';
 
 const suggestionSchema = z
   .object({
@@ -98,11 +99,22 @@ export async function suggestConversationServices(
       400,
       'A customer message or confirmed service detail is required to suggest services.',
     );
+  const companyId = services[0]?.companyId;
+  if (!companyId || services.some((service) => service.companyId !== companyId))
+    throw new HttpError(400, 'AI suggestions require a single business catalog.');
+  if (services.length > 200)
+    throw new HttpError(
+      400,
+      'AI suggestions support up to 200 active catalog services. Prepare this document manually.',
+    );
+  await reserveProviderUsage(companyId, 'AI_REQUEST');
 
   const response = await openai.responses
     .create(
       {
         model: env.OPENAI_MODEL,
+        store: false,
+        max_output_tokens: 3000,
         input: [
           {
             role: 'system',
@@ -163,7 +175,12 @@ export async function suggestConversationServices(
       { timeout: 60000, maxRetries: 0 },
     )
     .catch((error: unknown) => {
-      console.error('Conversation service suggestion failed', error);
+      console.error(
+        JSON.stringify({
+          event: 'conversation_service_suggestion_failed',
+          errorType: error instanceof Error ? error.name : 'Unknown',
+        }),
+      );
       throw new HttpError(
         502,
         'AI suggestions are unavailable. No draft was created; try again or prepare it manually.',
@@ -177,7 +194,7 @@ export async function suggestConversationServices(
     output = JSON.parse(response.output_text);
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
-    console.error('Invalid conversation suggestion JSON', error);
+    console.error(JSON.stringify({ event: 'conversation_suggestion_invalid_json' }));
     throw new HttpError(502, 'AI returned an unreadable suggestion. No estimate was created.');
   }
   return validateServiceSuggestions(output, services, inboundMessages);

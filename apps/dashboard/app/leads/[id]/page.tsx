@@ -32,7 +32,7 @@ export default async function LeadDetailPage({ params, searchParams }: LeadDetai
       getCustomers(company.id),
       getServices(company.id),
     ]);
-    data = { lead, customers, services };
+    data = { lead, customers, services, company };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       notFound();
@@ -46,7 +46,7 @@ export default async function LeadDetailPage({ params, searchParams }: LeadDetai
       </DashboardShell>
     );
   }
-  const { lead, customers, services } = data;
+  const { lead, customers, services, company } = data;
   const needsHuman = lead.needsHuman || lead.status === 'NEEDS_HUMAN';
 
   return (
@@ -122,7 +122,11 @@ export default async function LeadDetailPage({ params, searchParams }: LeadDetai
               )}
             </dl>
           </section>
-          <ConversationView messages={lead.messages} />
+          <ConversationView
+            messages={lead.messages}
+            companyId={lead.companyId}
+            canManageSms={company.role === 'OWNER'}
+          />
           <CallNoteHistory
             notes={lead.callNotes}
             companyId={lead.companyId}

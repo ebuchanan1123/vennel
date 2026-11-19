@@ -1,6 +1,7 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalPassThroughEnv": [
+    "NODE_ENV",
     "BETTER_AUTH_SECRET",
     "API_INTERNAL_URL",
     "DASHBOARD_BASE_URL",
@@ -8,6 +9,14 @@
     "RESEND_FROM_EMAIL",
     "RESEND_WEBHOOK_SECRET",
     "WORKER_POLL_INTERVAL_MS",
+    "WORKER_CONCURRENCY",
+    "API_RATE_LIMIT_PER_MINUTE",
+    "AI_DAILY_REQUEST_LIMIT",
+    "AI_DAILY_AUDIO_BYTE_LIMIT",
+    "SMS_DAILY_SEND_LIMIT",
+    "SMS_PROVIDER_TIMEOUT_MS",
+    "OPENAI_TIMEOUT_MS",
+    "RUN_DATABASE_TESTS",
     "DATABASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
@@ -43,6 +52,7 @@
     },
     "test": {
       "dependsOn": ["^test"],
+      "cache": false,
       "outputs": ["coverage/**"]
     }
   }

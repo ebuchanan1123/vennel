@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 import multer from 'multer';
+import { randomUUID } from 'node:crypto';
 
 export class HttpError extends Error {
   constructor(
@@ -27,6 +28,10 @@ export function errorHandler(
   next: NextFunction,
 ): void {
   void next;
+  if (error instanceof Error && 'type' in error && error.type === 'entity.parse.failed') {
+    res.status(400).json({ error: 'The request body is not valid JSON.' });
+    return;
+  }
   if (error instanceof Error && 'type' in error && error.type === 'entity.too.large') {
     res.status(413).json({ error: 'The request exceeds the endpoint size limit.' });
     return;
@@ -60,10 +65,20 @@ export function errorHandler(
       return;
     }
   }
-  // Keep customer responses generic and log details server-side.
-  console.error('Unhandled API error', error);
+  const requestId = randomUUID();
+  console.error(
+    JSON.stringify({
+      event: 'unhandled_api_error',
+      requestId,
+      errorType: error instanceof Error ? error.name : 'Unknown',
+      code: error instanceof Prisma.PrismaClientKnownRequestError ? error.code : null,
+      method: _req.method,
+    }),
+  );
 
+  res.setHeader('X-Request-Id', requestId);
   res.status(500).json({
     error: 'Internal server error',
+    requestId,
   });
 }

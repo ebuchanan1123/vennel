@@ -12,7 +12,7 @@ export const outboundEmailSchema = z
     subject: z.string().min(1),
     text: z.string(),
     html: z.string(),
-    headers: z.record(z.string()),
+    headers: z.record(z.string(), z.string()),
     reply_to: z.string().email().optional(),
   })
   .strict();

@@ -21,6 +21,9 @@ import { generateQualificationResponse } from './qualification.service.js';
 import { sendSmsDelivery } from './sms-delivery.service.js';
 import { createMissedCallGreeting } from './twilio.service.js';
 import { ProviderFailure } from './email-provider.service.js';
+import { ProviderUsageLimitError } from './provider-usage.service.js';
+import { normalizePhone } from './company.service.js';
+import { twilioPhoneSchema } from '../schemas/twilio.schema.js';
 
 export const QUALIFICATION_FALLBACK_MESSAGE =
   "Thanks - I've passed this along to the team, and someone will follow up with you.";
@@ -119,7 +122,10 @@ export async function processCommunicationJob(job: BackgroundJob): Promise<void>
         true,
       );
     const payload = payloadSchema.parse(current.payload);
-    if (current.company.twilioPhoneNumber !== payload.to)
+    if (
+      !current.company.twilioPhoneNumber ||
+      normalizePhone(current.company.twilioPhoneNumber) !== payload.to
+    )
       throw new ProviderFailure(
         'The receiving Twilio number is no longer assigned to this business.',
         false,
@@ -140,6 +146,25 @@ export async function processCommunicationJob(job: BackgroundJob): Promise<void>
       });
     }
     if (current.eventType === 'VOICE_STATUS' && !current.outboundMessageId) {
+      if (!twilioPhoneSchema.safeParse(payload.from).success) {
+        current.status = 'COMPLETED';
+        await tx.webhookEvent.update({
+          where: { id: current.id },
+          data: {
+            status: 'COMPLETED',
+            completedAt: new Date(),
+            lastError: 'The caller ID is unavailable; no SMS-capable recovery number was supplied.',
+          },
+        });
+        console.warn(
+          JSON.stringify({
+            event: 'missed_call_without_sms_number',
+            companyId,
+            webhookEventId: current.id,
+          }),
+        );
+        return current;
+      }
       const greeting = createMissedCallGreeting(current.company.name);
       const previous = await tx.message.findFirst({
         where: {
@@ -212,10 +237,15 @@ export async function processCommunicationJob(job: BackgroundJob): Promise<void>
           typeof error.status === 'number'
             ? error.status
             : null;
-        const retryable = !status || status === 429 || status >= 500;
-        qualificationError = status
-          ? `AI qualification failed (HTTP ${status}).`
-          : 'AI qualification was unavailable, timed out, or returned invalid output.';
+        const retryable =
+          !(error instanceof ProviderUsageLimitError) &&
+          (!status || status === 429 || status >= 500);
+        qualificationError =
+          error instanceof ProviderUsageLimitError
+            ? error.message
+            : status
+              ? `AI qualification failed (HTTP ${status}).`
+              : 'AI qualification was unavailable, timed out, or returned invalid output.';
         console.warn(
           JSON.stringify({
             event: 'sms_qualification_failed',
@@ -234,6 +264,12 @@ export async function processCommunicationJob(job: BackgroundJob): Promise<void>
     }
     await prisma.$transaction(async (tx) => {
       await assertJobLease(tx, job);
+      const currentLead = await tx.lead.findUniqueOrThrow({ where: { id: message.leadId } });
+      if (currentLead.updatedAt.getTime() !== message.lead.updatedAt.getTime())
+        throw new ProviderFailure(
+          'Lead data changed during qualification. Retry against the current conversation state.',
+          true,
+        );
       await updateLead(message.leadId, updates, tx);
       await createOutbound(tx, event.id, message.leadId, payload.to, payload.from, reply);
       if (qualificationError)

@@ -9,6 +9,7 @@ import {
   qualificationResultSchema,
   type QualificationResult,
 } from '../schemas/qualification.schema.js';
+import { reserveProviderUsage } from './provider-usage.service.js';
 
 export const openai = env.OPENAI_API_KEY
   ? new OpenAI({
@@ -115,8 +116,10 @@ export async function runQualificationModel(params: RequestParams): Promise<Qual
     throw new Error('OPENAI_API_KEY is not configured');
   }
 
+  await reserveProviderUsage(params.company.id, 'AI_REQUEST');
   const response = await openai.responses.create({
     model: env.OPENAI_MODEL,
+    store: false,
     max_output_tokens: 1200,
     input: [
       {

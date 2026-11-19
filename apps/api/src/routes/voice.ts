@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { env } from '../env.js';
 import { asyncHandler } from '../middleware/async-handler.js';
 import { twilioVoiceSchema, twilioVoiceStatusSchema } from '../schemas/twilio.schema.js';
-import { getCompanyBySlug, getCompanyByTwilioNumber } from '../services/company.service.js';
+import { getCompanyByTwilioNumber } from '../services/company.service.js';
 import { isMissedDialStatus } from '../services/dial-status.service.js';
 import { persistCommunicationEvent } from '../services/communication.service.js';
 import { validateTwilioSignature } from '../services/twilio.service.js';
@@ -79,13 +79,9 @@ voiceRouter.post(
       return;
     }
 
-    const company = await getCompanyBySlug(parsedQuery.data.companySlug);
+    const company = await getCompanyByTwilioNumber(parsed.data.To);
 
-    if (
-      !company?.isActive ||
-      !company.twilioPhoneNumber ||
-      company.twilioPhoneNumber !== parsed.data.To
-    ) {
+    if (!company || company.slug !== parsedQuery.data.companySlug) {
       res.status(404).send('Company not found');
       return;
     }

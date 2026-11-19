@@ -46,10 +46,20 @@ export class SmsProviderFailure extends ProviderFailure {
     retryable: boolean,
     blocked = false,
     public readonly uncertain = false,
+    public readonly providerCode?: string,
   ) {
     super(message, retryable, blocked);
     this.name = 'SmsProviderFailure';
   }
+}
+
+function twilioErrorCode(error: unknown): string | undefined {
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+  return typeof code === 'number' && Number.isSafeInteger(code) && code >= 0
+    ? String(code)
+    : typeof code === 'string' && /^\d{1,10}$/.test(code)
+      ? code
+      : undefined;
 }
 
 export function classifySmsFailure(error: unknown): SmsProviderFailure {
@@ -72,6 +82,8 @@ export function classifySmsFailure(error: unknown): SmsProviderFailure {
       `Twilio rejected the SMS request (HTTP ${status}).`,
       false,
       status === 401 || status === 403,
+      false,
+      twilioErrorCode(error),
     );
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'ECONNREFUSED')
     return new SmsProviderFailure(
@@ -133,15 +145,32 @@ export const smsProvider: SmsProvider = {
         false,
         true,
       );
-    const response = await twilioClient.messages(messageSidSchema.parse(providerId)).fetch();
-    return {
-      id: messageSidSchema.parse(response.sid),
-      status: twilioMessageStatusSchema.parse(response.status),
-      from: response.from,
-      to: response.to,
-      body: response.body,
-      errorCode: response.errorCode?.toString() ?? null,
-    };
+    try {
+      const response = await twilioClient.messages(messageSidSchema.parse(providerId)).fetch();
+      return {
+        id: messageSidSchema.parse(response.sid),
+        status: twilioMessageStatusSchema.parse(response.status),
+        from: response.from,
+        to: response.to,
+        body: response.body,
+        errorCode: response.errorCode?.toString() ?? null,
+      };
+    } catch (error) {
+      const status =
+        typeof error === 'object' &&
+        error !== null &&
+        'status' in error &&
+        typeof error.status === 'number'
+          ? error.status
+          : null;
+      throw new SmsProviderFailure(
+        status ? `Twilio status lookup failed (HTTP ${status}).` : 'Twilio status lookup failed.',
+        !status || status === 429 || status >= 500,
+        status === 401 || status === 403,
+        false,
+        twilioErrorCode(error),
+      );
+    }
   },
 };
 

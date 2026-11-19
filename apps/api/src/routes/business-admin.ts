@@ -18,8 +18,22 @@ import {
   onboardingSchema,
   updateOnboarding,
 } from '../services/onboarding.service.js';
+import { reconcileSmsDelivery, smsReconciliationSchema } from '../services/sms-delivery.service.js';
 
 export const businessAdminRouter = Router({ mergeParams: true });
+businessAdminRouter.post(
+  '/sms-deliveries/:id/reconcile',
+  asyncHandler(async (req, res) => {
+    const { companyId, id } = recordParamsSchema.parse(req.params);
+    await reconcileSmsDelivery(
+      companyId,
+      id,
+      currentAccount(req).id,
+      smsReconciliationSchema.parse(req.body),
+    );
+    res.status(204).send();
+  }),
+);
 businessAdminRouter.get(
   '/members',
   asyncHandler(async (req, res) => {

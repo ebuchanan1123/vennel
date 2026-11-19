@@ -311,6 +311,9 @@ export type SmsDeliveryRecord = {
   errorCode: string | null;
 };
 
+export type SmsReconciliationInput =
+  { action: 'LOOKUP'; providerId?: string } | { action: 'CONFIRM_NOT_SENT'; approved: true };
+
 export type BackgroundJobRecord = {
   id: string;
   kind:
@@ -319,7 +322,8 @@ export type BackgroundJobRecord = {
     | 'DOCUMENT_EMAIL'
     | 'LEAD_FOLLOW_UP_SUGGESTIONS'
     | 'INBOUND_SMS'
-    | 'MISSED_CALL_RECOVERY';
+    | 'MISSED_CALL_RECOVERY'
+    | 'SMS_STATUS_RECONCILIATION';
   status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'BLOCKED' | 'CANCELLED';
   attempts: number;
   maxAttempts: number;

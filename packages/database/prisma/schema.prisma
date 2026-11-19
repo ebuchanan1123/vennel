@@ -110,6 +110,7 @@ enum BackgroundJobKind {
   LEAD_FOLLOW_UP_SUGGESTIONS
   INBOUND_SMS
   MISSED_CALL_RECOVERY
+  SMS_STATUS_RECONCILIATION
 }
 
 enum CommunicationEventStatus {
@@ -185,6 +186,7 @@ model Company {
   membershipAudits        BusinessMembershipAudit[]
   conversations           Conversation[]
   webhookEvents           WebhookEvent[]
+  providerUsage           ProviderUsage[]
 
   @@index([slug])
   @@index([niche])
@@ -428,9 +430,34 @@ model SmsDelivery {
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 
-  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  message Message             @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reviews SmsDeliveryReview[]
 
   @@index([status, updatedAt])
+}
+
+model SmsDeliveryReview {
+  id         String   @id @default(cuid())
+  deliveryId String
+  actorId    String
+  action     String
+  providerId String?
+  createdAt  DateTime @default(now())
+
+  delivery SmsDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryId, createdAt])
+}
+
+model ProviderUsage {
+  companyId   String
+  kind        String
+  windowStart DateTime
+  used        Int
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@id([companyId, kind, windowStart])
 }
 
 model CallNote {

@@ -30,7 +30,7 @@ export const documentInclude = {
 
 type DocumentRecord = Prisma.BillingDocumentGetPayload<{ include: typeof documentInclude }>;
 
-const aiDraftSchema: z.ZodType<AiDraft, z.ZodTypeDef, unknown> = z.object({
+const aiDraftSchema: z.ZodType<AiDraft, unknown> = z.object({
   createdAt: z.string(),
   missingDetails: z.array(z.string()),
   matches: z.array(
@@ -52,10 +52,7 @@ const snapshotSchema: z.ZodType<CustomerSnapshot> = z.object({
   address: z.string().nullable(),
 });
 
-function storedJson<T>(
-  value: Prisma.JsonValue | null,
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
-): T | null {
+function storedJson<T>(value: Prisma.JsonValue | null, schema: z.ZodType<T, unknown>): T | null {
   if (value === null) return null;
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new Error('Stored billing document data failed validation.');

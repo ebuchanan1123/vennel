@@ -14,6 +14,7 @@ import type {
   WorkspaceSettings,
   BackgroundJobRecord,
   SmsDeliveryRecord,
+  SmsReconciliationInput,
   DocumentPreparationInput,
   DocumentEmailPreview,
   DocumentEmailApproval,
@@ -577,6 +578,19 @@ export function createApi(cookie?: string) {
       method: 'POST',
     });
   }
+  async function reconcileSmsDelivery(
+    companyId: string,
+    id: string,
+    input: SmsReconciliationInput,
+  ): Promise<void> {
+    await apiRequest(
+      workspacePath(companyId, `/sms-deliveries/${encodeURIComponent(id)}/reconcile`),
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    );
+  }
 
   function getAccount(): Promise<AccountProfile> {
     return apiFetch('/api/account');
@@ -691,6 +705,7 @@ export function createApi(cookie?: string) {
     saveWorkspaceSettings,
     getBackgroundJobs,
     retryBackgroundJob,
+    reconcileSmsDelivery,
     getMembers,
     getTeam,
     getWorkflowClock,
@@ -749,6 +764,7 @@ export const {
   saveWorkspaceSettings,
   getBackgroundJobs,
   retryBackgroundJob,
+  reconcileSmsDelivery,
   getMembers,
   getTeam,
   getWorkflowClock,

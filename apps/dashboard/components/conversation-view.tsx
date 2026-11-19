@@ -1,6 +1,7 @@
 import type { SmsDeliveryRecord } from '@lead-recovery/types';
 
 import { Icon } from './icon';
+import { SmsDeliveryActions } from './sms-delivery-actions';
 
 type ConversationMessage = {
   id: string;
@@ -20,7 +21,15 @@ const deliveryLabels: Record<SmsDeliveryRecord['status'], string> = {
   UNKNOWN: 'Provider outcome unknown - needs review',
 };
 
-export function ConversationView({ messages }: { messages: ConversationMessage[] }) {
+export function ConversationView({
+  messages,
+  companyId,
+  canManageSms = false,
+}: {
+  messages: ConversationMessage[];
+  companyId?: string;
+  canManageSms?: boolean;
+}) {
   return (
     <section className="panel flex flex-col">
       <div className="flex items-center justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:px-6">
@@ -73,6 +82,13 @@ export function ConversationView({ messages }: { messages: ConversationMessage[]
                     {message.smsDelivery?.lastError ? ` / ${message.smsDelivery.lastError}` : ''}
                   </p>
                 )}
+                {!inbound &&
+                  companyId &&
+                  canManageSms &&
+                  message.smsDelivery &&
+                  message.smsDelivery.status !== 'DELIVERED' && (
+                    <SmsDeliveryActions companyId={companyId} delivery={message.smsDelivery} />
+                  )}
                 <p
                   className={`mt-2.5 text-[10px] ${inbound ? 'text-slate-400' : 'text-indigo-100'}`}
                 >

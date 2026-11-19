@@ -25,6 +25,7 @@ const sendSms = vi.fn(async (input: { from: string; to: string; body: string }) 
 const sendEmail = vi.fn(async () => 'resend-auth-synthetic');
 let server: Server;
 let base: string;
+const allowedOrigins = new Set<string>();
 let makeApp: typeof import('../app.js').createApiApp;
 let makeAuth: typeof import('../auth.js').createAccountAuth;
 let owner: { id: string; email: string; cookie: string };
@@ -139,6 +140,14 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     if (!address || typeof address === 'string')
       throw new Error('Expected local account test port.');
     base = `http://127.0.0.1:${address.port}`;
+    allowedOrigins.add(base);
+    const localFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      if (!allowedOrigins.has(url.origin))
+        throw new Error('External provider calls are disabled in account tests.');
+      return localFetch(input, init);
+    });
     owner = await createUser('owner@accounts.example.test');
     staff = await createUser('staff@accounts.example.test');
     outsider = await createUser('outsider@accounts.example.test');
@@ -224,6 +233,7 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     if (/^accounts_test_[a-f0-9]{32}$/.test(schema))
       await admin.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.$disconnect();
+    vi.unstubAllGlobals();
   });
 
   it('requires a verified account and never grants existing companies to a new signup', async () => {
@@ -648,6 +658,7 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     await new Promise<void>((resolve) => limited.listen(0, '127.0.0.1', resolve));
     const address = limited.address();
     if (!address || typeof address === 'string') throw new Error('Expected rate-limit test port.');
+    allowedOrigins.add(`http://127.0.0.1:${address.port}`);
     try {
       let blocked = false;
       for (let attempt = 0; attempt < 22; attempt += 1) {
@@ -669,6 +680,7 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
       expect(blocked).toBe(true);
       expect(await database.rateLimit.count()).toBeGreaterThan(0);
     } finally {
+      allowedOrigins.delete(`http://127.0.0.1:${address.port}`);
       await new Promise<void>((resolve, reject) =>
         limited.close((error) => (error ? reject(error) : resolve())),
       );
@@ -768,6 +780,46 @@ describe.runIf(enabled).sequential('real accounts, membership authorization and 
     expect(
       (await request(`/api/workspace/${otherId}/settings`, 'GET', undefined, owner.cookie)).status,
     ).toBe(403);
+  });
+
+  it('requires a current owner for SMS recovery and scopes delivery records to the business', async () => {
+    const message = await database.message.create({
+      data: {
+        leadId: foreign.leadId,
+        direction: 'OUTBOUND',
+        body: 'Private other outbound SMS',
+        smsDelivery: {
+          create: {
+            fromPhone: '+15555550910',
+            toPhone: '+15555550900',
+            status: 'UNKNOWN',
+          },
+        },
+      },
+      include: { smsDelivery: true },
+    });
+    const id = message.smsDelivery?.id;
+    if (!id) throw new Error('Expected the foreign delivery fixture.');
+    const path = `/api/workspace/${companyId}/sms-deliveries/${id}/reconcile`;
+    const body = { action: 'LOOKUP' };
+    expect((await request(path, 'POST', body, staff.cookie)).status).toBe(403);
+    expect((await request(path, 'POST', body, outsider.cookie)).status).toBe(404);
+    expect((await request(path, 'POST', body, owner.cookie)).status).toBe(404);
+    expect(
+      (
+        await request(
+          `/api/workspace/${otherId}/sms-deliveries/${id}/reconcile`,
+          'POST',
+          body,
+          owner.cookie,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (await request(path, 'POST', { action: 'CONFIRM_NOT_SENT', approved: false }, owner.cookie))
+        .status,
+    ).toBe(400);
+    expect(await database.smsDeliveryReview.count()).toBe(0);
   });
 
   it('serializes competing owner demotions so a business never loses its last owner', async () => {
